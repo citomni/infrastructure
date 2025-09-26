@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="{{ $language }}">
+<head>
+    <meta charset="{{ $charset }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% yield meta_title %}</title>
+	<base href="{{ CITOMNI_PUBLIC_ROOT_URL . '/' }}">
+
+	<meta name="description" content="{% yield meta_description %}">
+	<meta name="keywords" content="{% yield meta_keywords %}">
+	
+	{% if(!empty($noindex)) %}
+		<meta name="robots" content="noindex, follow">
+	{% endif %}	
+	
+	{% if(!empty($canonical)) %}
+		<link rel="canonical" href="{{{ $canonical }}}">	
+	{% endif %}
+	
+	{{{ $marketing_scripts }}}	
+	
+	{% include "public/styles.html" %}	
+	
+	<!-- Another comment to be removed -->
+
+</head>
+<body>
+    <nav class="navbar">
+        <a href="{{ CITOMNI_PUBLIC_ROOT_URL }}/" class="navbar-title">CitOmni</a>
+        <ul>
+			{% if (!empty($is_loggedin)) %}
+				<li><a href="{{ $url('/member/home.html') }}">{{{ $txt('home_link', 'common', 'citomni/http', 'Home') }}}</a></li>
+				<li><a href="{{ $url('/member/profile.html') }}">{{{ $txt('profile_link', 'common', 'citomni/http', 'Profile') }}}</a></li>
+				<li><a href="{{ $url('/logout.html') }}">{{{ $txt('logout_link', 'common', 'citomni/http', 'Log out') }}}</a></li>
+			{% else %}
+				<li><a href="{{ $url('/kontakt.html') }}">{{{ $txt('contact_link', 'common', 'citomni/http', 'Contact us') }}}</a></li>
+				{% if $hasPackage('citomni/auth') %}
+					<li><a href="{{ $url('/login.html') }}">{{{ $txt('login_link', 'common', 'citomni/http', 'Login') }}}</a></li>
+				{% endif %}
+			{% endif %}
+        </ul>
+    </nav>
+
+    <div class="content">
+        <div class="card">
+			{% yield main_content %}			
+        </div>
+    </div>
+</body>
+</html>
