@@ -2,7 +2,7 @@
 	"name": "citomni/infrastructure",
 	"description": "Lean, cross-mode infrastructure for CitOmni apps: DB (LiteMySQLi), logging (LiteLog), text/i18n (LiteTxt), mail (PHPMailer), and optional contact routes.",
 	"type": "library",
-	"license": "GPL-3.0-or-later",
+	"license": "MIT",
 	"homepage": "https://github.com/citomni/infrastructure",
 	"keywords": [
 		"infrastructure", "cli", "php", "http", "captcha", "high-performance", "psr-4", "low-overhead", "deterministic", "php8", "citomni",  "citomni-framework",  "citomni-php", "green-by-design", "deterministic-config", "litemysqli", "phpmailer", "litelog", "litetxt", "i18n", "csrf", "framework"

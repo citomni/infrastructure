@@ -380,26 +380,33 @@ This keeps the infrastructure package **stateless**, while your application cont
 ## Coding & Documentation Conventions
 
 All CitOmni projects follow the shared conventions documented here:  
-[CitOmni Coding & Documentation Conventions](https://github.com/citomni/kernel/blob/main/docs/CONVENTIONS.md)
+[CitOmni Coding & Documentation Conventions](https://github.com/citomni/docs/blob/main/contribute/CONVENTIONS.md)
 
 ---
 
 ## License
 
-CitOmni Infrastructure is released under the **GNU General Public License v3.0 or later**.
-See [LICENSE](LICENSE) for details.
+**CitOmni Infrastructure** is open-source under the **MIT License**.  
+See: [LICENSE](LICENSE).
+
+**Trademark notice:** "CitOmni" and the CitOmni logo are trademarks of **Lars Grove Mortensen**.  
+You may not use the CitOmni name or logo to imply endorsement or affiliation without prior written permission.
 
 ---
 
 ## Trademarks
 
-"CitOmni" and the CitOmni logo are trademarks of Lars Grove Mortensen; factual references are allowed, but do not modify the marks, create confusingly similar logos, or imply endorsement.
+"CitOmni" and the CitOmni logo are trademarks of **Lars Grove Mortensen**.  
+You may make factual references to "CitOmni", but do not modify the marks, create confusingly similar logos,  
+or imply sponsorship, endorsement, or affiliation without prior written permission.  
+Do not register or use "citomni" (or confusingly similar terms) in company names, domains, social handles, or top-level vendor/package names.  
+For details, see the project's [NOTICE](NOTICE).
 
 ---
 
 ## Author
 
-Developed by **Lars Grove Mortensen** © 2012-2025
+Developed by **Lars Grove Mortensen** © 2012-present
 Contributions and pull requests are welcome!
 
 ---
