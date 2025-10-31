@@ -151,6 +151,21 @@ final class Services {
 		],
 
 
+
+		/*
+		 *------------------------------------------------------------------
+		 * VIEW / CONTENT / TEMPLATE ENGINE 
+		 *------------------------------------------------------------------
+		 */
+		
+		'view' => [
+			'template_layers' => [
+				'citomni/infrastructure'   => \CITOMNI_APP_PATH . '/vendor/citomni/infrastructure/templates',
+			],
+		],
+		
+		
+
 		/*
 		 *------------------------------------------------------------------
 		 * ROUTES
