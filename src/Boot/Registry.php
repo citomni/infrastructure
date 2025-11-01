@@ -16,10 +16,16 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Boot;
 
 /**
- * Baseline shared services for HTTP & CLI.
- * App can override any id in /config/services.php.
+ * Registry:
+ * Declares this package's contributions to the host app:
+ * - MAP_HTTP / MAP_CLI service bindings
+ * - CFG_HTTP / CFG_CLI config overlay
+ * - ROUTES_HTTP route definitions
+ *
+ * The App boot process will merge these into the final runtime.
  */
-final class Services {
+final class Registry {
+	
 	public const MAP_HTTP = [
 		'db'   => \CitOmni\Infrastructure\Service\Db::class,
 		'log'  => \CitOmni\Infrastructure\Service\Log::class,
@@ -29,7 +35,7 @@ final class Services {
 		// 'fs'=> \CitOmni\Infrastructure\Service\Filesystem\Filesystem::class,
 	];
 
-	// Optional cfg defaults for both modes (last-wins merge i App):
+
 	public const CFG_HTTP = [
 
 		/*
@@ -163,34 +169,28 @@ final class Services {
 				'citomni/infrastructure'   => \CITOMNI_APP_PATH . '/vendor/citomni/infrastructure/templates',
 			],
 		],
-		
-		
 
-		/*
-		 *------------------------------------------------------------------
-		 * ROUTES
-		 *------------------------------------------------------------------
-		 * Define the routes for the URIs that should be met with a response
-		 * The defined routes will be parsed by the dispatcher later on.
-		 *
-		 */
-
-		'routes' => [
-			'/kontakt.html' => [
-				'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
-				'action' => 'contact',
-				'methods' => ['GET','POST'],
-				'template_file' => 'public/contact.html',
-				'template_layer' => 'citomni/infrastructure'
-			],
-			'/captcha' => [
-				'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
-				'action' => 'captcha',
-				'methods' => ['GET']
-			],
+	];
+	
+	
+	public const ROUTES_HTTP = [
+	
+		'/kontakt.html' => [
+			'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
+			'action' => 'contact',
+			'methods' => ['GET','POST'],
+			'template_file' => 'public/contact.html',
+			'template_layer' => 'citomni/infrastructure'
+		],
+		'/captcha' => [
+			'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
+			'action' => 'captcha',
+			'methods' => ['GET']
 		],
 
 	];
+	
+	
 
 	// Same defaults for CLI
 	public const MAP_CLI = self::MAP_HTTP;

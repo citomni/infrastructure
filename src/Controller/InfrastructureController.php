@@ -142,7 +142,7 @@ class InfrastructureController extends BaseController {
 		}
 
 		// Render the contact form view, passing form state and feedback variables
-		$this->app->view->render((string)$this->routeConfig['template_file'],(string)$this->routeConfig['template_layer'], [
+		$this->app->tplEngine->render((string)$this->routeConfig['template_file'] . "@" . (string)$this->routeConfig['template_layer'], [
 				
 				// Controls whether to add <meta name="robots" content="noindex"> in the template (1 = add, 0 = do not add)
 				'noindex'       => 0,

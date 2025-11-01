@@ -31,14 +31,14 @@
 	
 	{{{ $marketing_scripts }}}	
 	
-	{% include "public/styles.html" %}	
+	{% include "public/styles.html@citomni/infrastructure" %}	
 	
 	<!-- Another comment to be removed -->
 
 </head>
 <body>
     <nav class="navbar">
-        <a href="{{ CITOMNI_PUBLIC_ROOT_URL }}/" class="navbar-title">CitOmni</a>
+        <a href="{{ $public_root_url }}/" class="navbar-title">CitOmni</a>
         <ul>
 			{% if (!empty($is_loggedin)) %}
 				<li><a href="{{ $url('/member/home.html') }}">{{{ $txt('home_link', 'common', 'citomni/http', 'Home') }}}</a></li>
