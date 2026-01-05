@@ -31,8 +31,13 @@ final class Registry {
 		'log'  => \CitOmni\Infrastructure\Service\Log::class,
 		'txt'  => \CitOmni\Infrastructure\Service\Txt::class,
 		'mailer' => \CitOmni\Infrastructure\Service\Mailer::class,
+		'formatNumber' => \CitOmni\Infrastructure\Service\FormatNumber::class,
+		
 		// 'cache'=> \CitOmni\Infrastructure\Service\FileCache::class,
 		// 'fs'=> \CitOmni\Infrastructure\Service\Filesystem\Filesystem::class,
+		
+		// Test service
+		// 'winProbe' => \CitOmni\Infrastructure\Service\WinProbe::class,
 	];
 
 
@@ -46,8 +51,8 @@ final class Registry {
 		
 		'db' => [
 			'host'		=> 'localhost',
-			'user'		=> 'root',
-			'pass'		=> '',
+			'user'		=> 'citomni',
+			'pass'		=> 'citomniDbPw123_',
 			'name'		=> 'citomni',
 			'charset'	=> 'utf8mb4',
 		],
