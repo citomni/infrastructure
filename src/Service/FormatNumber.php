@@ -113,13 +113,20 @@ final class FormatNumber extends BaseService {
 		}
 
 		// Reject dot-decimal UI input (e.g. "1234.56") by policy.
-		// If there is a dot and also digits after it but no comma, this could be decimal or thousands.
-		// We choose to fail fast rather than guess.
+		// If there is a dot and no comma, the input is ambiguous: It could be decimal or thousands grouping.
+		// We still choose to fail fast on dot-decimal shapes, but must allow *valid* thousands grouping.
+		// Therefore:
+		//   - Accept strict thousands grouping (e.g. "300.000", "1.234.567").
+		//   - Reject plain "digits.digits" forms that are not valid grouping, as they imply dot-decimal UI input.
 		if ($commaCount === 0 && \strpos($raw, self::UI_THOUSANDS_DOT) !== false) {
-			// Reject any dot-decimal shape "digits.digits" in UI.
-			// Dots are allowed only as strict thousands grouping when no comma is present.
-			if (\preg_match('/^\d+\.\d+$/', $raw) === 1) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_format_number_dot_decimal_not_supported', 'format_number', 'citomni/infrastructure', 'Invalid number: Dot-decimal UI input is not supported. Use comma as decimal separator.'));
+			$isPlainDotDecimal = (\preg_match('/^\d+\.\d+$/', $raw) === 1);
+			$isValidDotGrouping = (\preg_match('/^\d{1,3}(\.\d{3})*$/', $raw) === 1);
+
+			// Reject ambiguous dot-decimal UI input, unless it is valid thousands grouping.
+			if ($isPlainDotDecimal && !$isValidDotGrouping) {
+				throw new \InvalidArgumentException(
+					$this->app->txt->get('err_format_number_dot_decimal_not_supported', 'format_number', 'citomni/infrastructure', 'Invalid number: Dot-decimal UI input is not supported. Use comma as decimal separator.')
+				);
 			}
 		}
 
