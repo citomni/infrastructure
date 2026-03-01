@@ -31,6 +31,10 @@ final class Registry {
 		'log'  => \CitOmni\Infrastructure\Service\Log::class,
 		'txt'  => \CitOmni\Infrastructure\Service\Txt::class,
 		'mailer' => \CitOmni\Infrastructure\Service\Mailer::class,
+		'valueToSql' => \CitOmni\Infrastructure\Service\ValueToSql::class,
+		'valueFromSql' => \CitOmni\Infrastructure\Service\ValueFromSql::class,
+		
+		// FormatNumber has been deprecated and will be removed soon...
 		'formatNumber' => \CitOmni\Infrastructure\Service\FormatNumber::class,
 		
 		// 'cache'=> \CitOmni\Infrastructure\Service\FileCache::class,
@@ -170,13 +174,24 @@ final class Registry {
 		 
 		'locale' => [
 			'format' => [
-				'number' => [
-					'decimal_separator'	 => ',',
-					'thousand_separator' => '.',
-				],
-				// We will leave these out for now, but the namespace exists:
-				// 'date' => [],
-				// 'time' => [],
+
+				// Required: Separators (strict)
+				'decimal_separator' => ',', // Must be exactly 1 char.
+				'thousand_separator' => '.', // '' or exactly 1 char (set '' to disable grouping separator). Must differ from decimal_separator!
+
+				// Required: Integer/decimal grouping
+				'group_thousands' => true, // Note: If group_thousands=true but thousand_separator='', grouping is effectively disabled (I know; slightly self-contradictory cfg, but that's what I chose to go with).
+
+				// Required: Decimal policy (strict)
+				'decimal_scale' => 2, // Must be between 0 and 18
+				'decimal_string_rounding' => 'fail', // "fail" | "truncate" | "half_up". NOTE: Case-sensitive!
+				'decimal_trim_trailing_zeros' => false,
+
+				// Required: HTML <input type="time"> precision
+				'time_include_seconds' => false,
+
+				// Required: HTML <input type="datetime-local"> precision
+				'datetime_local_include_seconds' => false,
 			],
 		],
 
