@@ -15,280 +15,382 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Service;
 
+use CitOmni\Infrastructure\Exception\TxtConfigException;
 use CitOmni\Kernel\Service\BaseService;
-use LiteTxt\LiteTxt;
 
 /**
- * Txt: Lightweight text/translation loader for app and vendor layers.
+ * Resolves translated text strings from application or vendor language files.
  *
- * Responsibilities:
- * - Resolve language strings from PHP array files under /language/{lang}/{file}.php.
- * - Interpolate %UPPERCASE% placeholders from a provided map.
- * - Select source layer: (1) app (CITOMNI_APP_PATH/language) or (2) vendor/package
- *   (CITOMNI_APP_PATH/vendor/{vendor/package}/language).
+ * This service is a native CitOmni replacement for the former LiteTxt-backed
+ * wrapper. The public API remains unchanged for migration safety, while the
+ * internal implementation now performs file lookup, payload caching, and
+ * structured logging natively.
  *
- * Collaborators:
- * - Reads configuration from App->cfg (locale.language, txt.log.*).
- * - Delegates text file loading and miss-logging to LiteTxt.
+ * Behavior:
+ * - Validates and caches the active language once during initialization
+ * - Resolves language files from either the app layer or a vendor/package layer
+ * - Caches loaded language payloads in-memory by absolute file path
+ * - Logs operational content issues and falls back to default behavior
  *
- * Configuration keys:
- * - locale.language (string) - Current locale in "xx" or "xx_YY" form; required.
- * - txt.log.file (string) - Log filename for LiteTxt warnings; required.
- * - txt.log.path (string) - Absolute or app-relative directory path; required.
+ * Compatibility:
+ * - Caller-visible lookup semantics are preserved
+ * - Missing, invalid, or unusable translation values still fall back to $default
+ * - Diagnostics are modernized through the native log service
+ * - Missing language files now produce one log event instead of the old
+ *   indirect two-step pattern
  *
- * Error handling:
- * - Fail-fast: Invalid or missing configuration throws \InvalidArgumentException.
- * - Fail-soft (by design): Missing translation keys return the provided default;
- *   LiteTxt logs a JSON line to txt.log.path/txt.log.file.
- *
- * Typical usage:
- * Resolve UI copy and system messages with optional placeholder substitution for both app and package layers.
- *
- * Examples:
- *
- *   // Core example: App layer (en), simple lookup (no placeholders)
- *   // File: CITOMNI_APP_PATH/language/en/common.php -> ['hello' => 'Hello']
- *   $msg = $this->app->txt->get('hello', 'common', 'app', 'Hi');
- *   // "Hello"
- *
- *   // Scenario: Missing key -> default returned, JSON line logged
- *   // File: CITOMNI_APP_PATH/language/en/common.php  // No 'missing_key' defined
- *   $msg = $this->app->txt->get('missing_key', 'common', 'app', '[N/A]');
- *   // "[N/A]"  (LiteTxt logs to CITOMNI_APP_PATH/var/logs/{txt.log.file})
- *
- *   // Scenario: App layer subdirectory + placeholder
- *   // File: CITOMNI_APP_PATH/language/da/member/profile.php -> ['headline' => 'Hej %NAME%!']
- *   $msg = $this->app->txt->get('headline', 'member/profile', 'app', 'Hej!', ['name' => 'Sarah']);
- *   // "Hej Sarah!"
- *
- *   // Scenario: Vendor layer (en) with placeholder
- *   // File: CITOMNI_APP_PATH/vendor/citomni/auth/language/en/login.php -> ['error_locked' => 'Account for %EMAIL% is locked.']
- *   $msg = $this->app->txt->get('error_locked', 'login', 'citomni/auth', 'Locked.', ['email' => 'jane@example.com']);
- *   // "Account for jane@example.com is locked."
- *
- *   // Scenario: Regioned locale (en_US)
- *   // File: CITOMNI_APP_PATH/language/en_US/common.php -> ['ok' => 'Fine.']
- *   $msg = $this->app->txt->get('ok', 'common', 'app', 'Default');
- *   // "Fine."
- *
- *   // Scenario: Invalid inputs -> throws \InvalidArgumentException
- *   // Layer must be 'app' or 'vendor/package'; file must be safe (no '..')
- *   $this->app->txt->get('k', 'bad/../path', 'app', 'x');         // throws
- *   $this->app->txt->get('k', 'f', 'citomni', 'x');               // throws
- *
- * Failure:
- * - Missing or malformed cfg (locale.language, txt.log.file, txt.log.path) => \InvalidArgumentException.
- * - Missing translation key => returns $default; LiteTxt emits a JSON line to the configured log file.
+ * Notes:
+ * - Real configuration errors still fail fast
+ * - This service intentionally depends on the native log service
+ * - Absence of the logger is considered framework misconfiguration and should
+ *   propagate normally through the global error handler
+ * - Cache lifetime is the current request/process lifetime
  */
 final class Txt extends BaseService {
+	
+	private const LOG_FILE = 'txt.jsonl';
+	private const APP_LAYER = 'app';
+	private const APP_LANGUAGE_PATH = \CITOMNI_APP_PATH . '/language';
+	private const VENDOR_PATH = \CITOMNI_APP_PATH . '/vendor';
+	private const FILE_PATTERN = '~^[A-Za-z0-9](?:[A-Za-z0-9/_-]*[A-Za-z0-9])?$~';
+	private const LAYER_PATTERN = '~^[a-z0-9._-]+/[a-z0-9._-]+$~i';
+	private const LANGUAGE_PATTERN = '~^[a-z]{2}(?:_[A-Z]{2})?$~';
+
 
 	/**
-	 * Return a translated/templated string from a language file.
+	 * Cached language payloads keyed by absolute file path.
+	 *
+	 * Array shape:
+	 * - <absolute-file-path> => array<string, mixed>
+	 *
+	 * Invalid or missing payloads are normalized to an empty array after a
+	 * single log event during first load.
+	 *
+	 * @var array<string, array<string, mixed>>
+	 */
+	private array $cache = [];
+
+
+	/**
+	 * Cached active language code validated during initialization.
+	 *
+	 * @var string
+	 */
+	private string $language;
+
+
+	/**
+	 * Initialize the service and validate required configuration once.
 	 *
 	 * Behavior:
-	 * - Resolve base directory from $layer ("app" or "vendor/package").
-	 * - Validate and read locale.language; enforce "xx" or "xx_YY".
-	 * - Validate txt.log.file and txt.log.path and build full log path.
-	 * - Build {base}/{lang}/{file}.php and resolve $key via LiteTxt.
-	 * - Interpolate %UPPERCASE% placeholders from $vars (values string-cast).
+	 * - Reads cfg.locale.language
+	 * - Validates the language format
+	 * - Stores the validated value for hot-path reuse
+	 * - Clears constructor options after initialization
 	 *
-	 * Notes:
-	 * - No filesystem probing here (is_dir, exists); keep hot path cheap.
-	 * - Filename validation forbids traversal and reserves only safe chars.
-	 *
-	 * Failure:
-	 * - Invalid $layer or $file => \InvalidArgumentException.
-	 * - Missing/invalid cfg keys => \InvalidArgumentException.
-	 *
-	 * @param string $key Array key to fetch from the language file.
-	 * @param string $file File path (no ".php"), e.g. "login" or "member/profile".
-	 * @param string $layer "app" or "vendor/package" (e.g., "citomni/auth").
-	 * @param string $default Fallback text if key is missing.
-	 * @param array<string,string|int|float|bool|\Stringable> $vars Placeholder map; values string-cast.
-	 * @return string Resolved text or $default if not found.
-	 * @throws \InvalidArgumentException On invalid/missing cfg or unsafe inputs.
+	 * @return void
+	 * @throws TxtConfigException When locale.language is missing or invalid.
 	 */
-	public function get(string $key, string $file, string $layer = 'app', string $default = '', array $vars = []): string {
-		
-		$basePath = $this->resolveBasePath($layer);
-		$lang     = $this->requireValidLanguage();
-		[$logDir, $logFile] = $this->requireLogCfg();
+	protected function init(): void {
+		$cfg = $this->app->cfg;
 
-		// Validate file segments: Safe chars and forward slashes only; no traversal.
-		if (
-			$file === '' ||
-			\str_contains($file, '..') ||
-			!\preg_match('~^[A-Za-z0-9](?:[A-Za-z0-9/_-]*[A-Za-z0-9])?$~', $file)
-		) {
-			throw new \InvalidArgumentException("Invalid language file name '{$file}'.");
+		if (!isset($cfg->locale) || !isset($cfg->locale->language)) {
+			throw new TxtConfigException('Missing required config: locale.language');
 		}
 
-		// Build absolute source and log paths (no IO checks by policy; cheap string work only).
-		$filePath = $basePath . '/' . $lang . '/' . $file . '.php';
-		$logPath  = \rtrim($logDir, "/\\") . '/' . $logFile;
+		$language = (string)$cfg->locale->language;
 
-		// Delegate the lookup and miss-logging to LiteTxt (keeps this class lean).
-		$txt = LiteTxt::get($filePath, $key, $default, $logPath);
-
-		// Placeholder interpolation via a single strtr for O(n) replacement.
-		if ($vars) {
-			$map = [];
-			foreach ($vars as $k => $v) {
-				$map['%' . \strtoupper((string)$k) . '%'] = (string)$v;
-			}
-			if ($map) {
-				$txt = \strtr($txt, $map);
-			}
+		if (!\preg_match(self::LANGUAGE_PATTERN, $language)) {
+			throw new TxtConfigException(
+				"Invalid locale.language '{$language}'. Expected 'xx' or 'xx_YY' (e.g. 'da' or 'da_DK')."
+			);
 		}
 
-		return $txt;
+		$this->language = $language;
+		$this->options = [];
 	}
 
 
 	/**
-	 * Resolve base language directory for the given layer.
+	 * Resolve a translated string from a language file.
 	 *
-	 * Notes:
-	 * - Slugs are validated as "vendor/package" with safe characters.
+	 * Behavior:
+	 * - Validates caller-supplied file and layer arguments
+	 * - Loads and caches the target language file on first access
+	 * - Returns the resolved value if it is string or scalar
+	 * - Logs and returns $default for missing, empty, or non-scalar values
+	 * - Applies %NAME%-style placeholder replacement when $vars is non-empty
 	 *
-	 * Typical usage:
-	 *   Called by get() prior to building the absolute {base}/{lang}/{file}.php.
-	 *
-	 * Examples:
-	 *
-	 *   // App layer
-	 *   // resolveBasePath('app') => /.../app/language
-	 *
-	 *   // Vendor layer
-	 *   // resolveBasePath('citomni/auth') => /.../app/vendor/citomni/auth/language
-	 *
-	 * Failure:
-	 * - Invalid slug => \InvalidArgumentException.
-	 *
-	 * @param string $layer "app" or "vendor/package".
-	 * @return string Absolute base path.
-	 * @throws \InvalidArgumentException If layer is malformed.
+	 * @param string $key Translation key to resolve.
+	 * @param string $file Relative language file name without .php extension.
+	 * @param string $layer Layer identifier. Use 'app' or 'vendor/package'.
+	 * @param string $default Fallback value when lookup cannot return a usable value.
+	 * @param array $vars Placeholder values mapped to %UPPERCASE_KEY%.
+	 * @return string Resolved text or fallback string.
+	 * @throws \InvalidArgumentException When $file or $layer is invalid.
 	 */
-	private function resolveBasePath(string $layer): string {
-		
-		if ($layer === 'app') {
-			return \CITOMNI_APP_PATH . '/language';
+	public function get(string $key, string $file, string $layer = self::APP_LAYER, string $default = '', array $vars = []): string {
+		$this->assertValidFile($file);
+
+		$filePath = $this->buildFilePath($file, $layer, $this->language);
+		$data = $this->loadFileData($filePath, $file, $key, $layer);
+
+		if (!isset($data[$key]) || $data[$key] === null || $data[$key] === '') {
+			$this->logMissingKey($filePath, $key, $layer);
+
+			return $this->applyVars($default, $vars);
 		}
+
+		$value = $data[$key];
+
+		if (\is_string($value)) {
+			return $this->applyVars($value, $vars);
+		}
+
+		if (\is_scalar($value)) {
+			return $this->applyVars((string)$value, $vars);
+		}
+
+		$this->logNonScalarValue($filePath, $key, $layer, $value);
+
+		return $this->applyVars($default, $vars);
+	}
+
+
+	/**
+	 * Validate the language file identifier.
+	 *
+	 * @param string $file Relative language file name without extension.
+	 * @return void
+	 * @throws \InvalidArgumentException When the file name is empty or unsafe.
+	 */
+	private function assertValidFile(string $file): void {
+		if (
+			$file === '' ||
+			\str_contains($file, '..') ||
+			!\preg_match(self::FILE_PATTERN, $file)
+		) {
+			throw new \InvalidArgumentException("Invalid language file name '{$file}'.");
+		}
+	}
+
+
+	/**
+	 * Build the absolute path to a language file.
+	 *
+	 * @param string $file Relative language file name without extension.
+	 * @param string $layer Layer identifier. Use 'app' or 'vendor/package'.
+	 * @param string $language Active language code.
+	 * @return string Absolute file path.
+	 * @throws \InvalidArgumentException When the layer identifier is invalid.
+	 */
+	private function buildFilePath(string $file, string $layer, string $language): string {
+		if ($layer === self::APP_LAYER) {
+			return self::APP_LANGUAGE_PATH . '/' . $language . '/' . $file . '.php';
+		}
+
 		$slug = \trim($layer, '/');
 
-		// Security boundary: Accept only simple "vendor/package" slugs (no traversal or extra separators).
-		if (!\preg_match('~^[a-z0-9._-]+/[a-z0-9._-]+$~i', $slug)) {
+		if (!\preg_match(self::LAYER_PATTERN, $slug)) {
 			throw new \InvalidArgumentException(
 				"Invalid text layer '{$layer}'. Expected 'vendor/package', e.g. 'citomni/auth'."
 			);
 		}
-		return \CITOMNI_APP_PATH . '/vendor/' . $slug . '/language';
+
+		return self::VENDOR_PATH . '/' . $slug . '/language/' . $language . '/' . $file . '.php';
 	}
 
 
 	/**
-	 * Validate and return the configured locale language.
+	 * Load and cache a language file payload.
 	 *
 	 * Behavior:
-	 * - Read $this->app->cfg->locale->language.
-	 * - Enforce pattern "xx" or "xx_YY" (lowercase lang, optional uppercase region: i.e. 'da' or 'da_DK').
-	 * - Return the validated language string.
+	 * - Includes the file only once per absolute path
+	 * - Logs missing files exactly once on first access
+	 * - Normalizes missing or invalid payloads to an empty array
+	 * - Logs invalid payloads once on first load
 	 *
 	 * Notes:
-	 * - Regex keeps the check ASCII-cheap and avoids locale conversions.
+	 * - Missing files are treated as empty arrays for compatibility
+	 * - Files that return non-array values are treated as operational content issues
 	 *
-	 * Typical usage:
-	 *   Called by get() before constructing the language file path.
-	 *
-	 * Examples:
-	 *
-	 *   // Accept
-	 *   // 'da' -> 'da', 'en_US' -> 'en_US'
-	 *
-	 *   // Reject
-	 *   // 'en-us' or 'english' => throws \InvalidArgumentException
-	 *
-	 * Failure:
-	 * - Missing or invalid locale.language => \InvalidArgumentException.
-	 *
-	 * @return string Validated language code.
-	 * @throws \InvalidArgumentException If locale.language is missing or malformed.
+	 * @param string $filePath Absolute language file path.
+	 * @param string $file Relative language file name without extension.
+	 * @param string $key Translation key for diagnostics.
+	 * @param string $layer Layer identifier for diagnostics.
+	 * @return array<string, mixed> Normalized language data.
 	 */
-	private function requireValidLanguage(): string {
-		
-		$cfg = $this->app->cfg;
-		
-		if (!isset($cfg->locale) || !isset($cfg->locale->language)) {
-			throw new \InvalidArgumentException('Missing required config: locale.language');
+	private function loadFileData(string $filePath, string $file, string $key, string $layer): array {
+		if (isset($this->cache[$filePath])) {
+			return $this->cache[$filePath];
 		}
-		$lang = (string)$cfg->locale->language;
 
-		// Policy: "xx" or "xx_YY" (keeps matrix small and explicit).
-		if (!\preg_match('~^[a-z]{2}(?:_[A-Z]{2})?$~', $lang)) {
-			throw new \InvalidArgumentException(
-				"Invalid locale.language '{$lang}'. Expected 'xx' or 'xx_YY' (e.g. 'da' or 'da_DK')."
-			);
+		if (!\is_file($filePath)) {
+			$this->logMissingFile($filePath, $file, $key, $layer);
+			$this->cache[$filePath] = [];
+
+			return $this->cache[$filePath];
 		}
-		
-		return $lang;
+
+		$data = include $filePath;
+
+		if (!\is_array($data)) {
+			$this->logInvalidFilePayload($filePath, $layer, $data);
+			$this->cache[$filePath] = [];
+
+			return $this->cache[$filePath];
+		}
+
+		$this->cache[$filePath] = $data;
+
+		return $this->cache[$filePath];
 	}
 
 
 	/**
-	 * Validate and return [logDir, logFile] from configuration.
+	 * Apply placeholder replacement using %UPPERCASE_KEY% tokens.
 	 *
-	 * Behavior:
-	 * - Require presence of txt.log.file and txt.log.path.
-	 * - Ensure txt.log.file is a plain filename (basename-only).
-	 * - Return [path, file] for caller to assemble a full path.
-	 *
-	 * Notes:
-	 * - No directory existence checks here; IO is left to the writer (LiteTxt).
-	 * - Cheap validation prevents accidental traversal or surprising separators.
-	 *
-	 * Typical usage:
-	 *   Called by get() to supply LiteTxt with a destination for JSON lines.
-	 *
-	 * Examples:
-	 *
-	 *   // Accept
-	 *   // ['path' => '/var/app/var/logs', 'file' => 'litetxt_errors.jsonl']
-	 *
-	 *   // Reject
-	 *   // file => '../oops.jsonl' or 'logs/oops.jsonl' => throws \InvalidArgumentException
-	 *
-	 * Failure:
-	 * - Missing txt.log.* or invalid filename/path => \InvalidArgumentException.
-	 *
-	 * @return array{0:string,1:string} [logDir, logFile].
-	 * @throws \InvalidArgumentException If required keys are missing or invalid.
+	 * @param string $text Source text.
+	 * @param array $vars Placeholder values.
+	 * @return string Text with placeholder substitution applied.
 	 */
-	private function requireLogCfg(): array {
-		
-		$cfg = $this->app->cfg;
-
-		if (!isset($cfg->txt) || !isset($cfg->txt->log)) {
-			throw new \InvalidArgumentException('Missing required config: txt.log');
-		}
-		if (!isset($cfg->txt->log->file)) {
-			throw new \InvalidArgumentException('Missing required config: txt.log.file');
-		}
-		if (!isset($cfg->txt->log->path)) {
-			throw new \InvalidArgumentException('Missing required config: txt.log.path');
+	private function applyVars(string $text, array $vars): string {
+		if ($vars === []) {
+			return $text;
 		}
 
-		$logFile = (string)$cfg->txt->log->file;
-		$logDir  = (string)$cfg->txt->log->path;
+		$map = [];
 
-		// Security boundary: Only accept basename as filename to avoid sneaky directories.
-		if ($logFile === '' || $logFile !== \basename($logFile)) {
-			throw new \InvalidArgumentException("Invalid txt.log.file '{$logFile}'. Filename only, no directories.");
-		}
-		if ($logDir === '') {
-			throw new \InvalidArgumentException('Invalid txt.log.path (empty).');
+		foreach ($vars as $key => $value) {
+			$map['%' . \strtoupper((string)$key) . '%'] = (string)$value;
 		}
 
-		return [$logDir, $logFile];
+		if ($map === []) {
+			return $text;
+		}
+
+		return \strtr($text, $map);
 	}
-	
+
+
+	/**
+	 * Log that a language file is missing.
+	 *
+	 * This is intentionally a single logged condition. The file is then cached
+	 * as an empty dataset so subsequent lookups remain cheap and deterministic.
+	 *
+	 * @param string $filePath Absolute language file path.
+	 * @param string $file Relative language file name without extension.
+	 * @param string $key Translation key.
+	 * @param string $layer Layer identifier.
+	 * @return void
+	 */
+	private function logMissingFile(string $filePath, string $file, string $key, string $layer): void {
+		$this->app->log->write(
+			self::LOG_FILE,
+			'txt.missing_file',
+			'Language file was not found. Caching empty dataset and returning default for lookups.',
+			[
+				'file_path' => $filePath,
+				'file' => $file,
+				'key' => $key,
+				'layer' => $layer,
+				'language' => $this->language,
+			] + $this->getRuntimeContext()
+		);
+	}
+
+
+	/**
+	 * Log that a language file returned an invalid payload.
+	 *
+	 * @param string $filePath Absolute language file path.
+	 * @param string $layer Layer identifier.
+	 * @param mixed $payload Raw included payload.
+	 * @return void
+	 */
+	private function logInvalidFilePayload(string $filePath, string $layer, mixed $payload): void {
+		$this->app->log->write(
+			self::LOG_FILE,
+			'txt.invalid_file_payload',
+			'Language file did not return a valid PHP array. Falling back to empty dataset.',
+			[
+				'file_path' => $filePath,
+				'layer' => $layer,
+				'language' => $this->language,
+				'payload_type' => \get_debug_type($payload),
+			] + $this->getRuntimeContext()
+		);
+	}
+
+
+	/**
+	 * Log that a translation key is missing or empty.
+	 *
+	 * @param string $filePath Absolute language file path.
+	 * @param string $key Translation key.
+	 * @param string $layer Layer identifier.
+	 * @return void
+	 */
+	private function logMissingKey(string $filePath, string $key, string $layer): void {
+		$this->app->log->write(
+			self::LOG_FILE,
+			'txt.missing_key',
+			'Translation key is missing or empty. Returning default value.',
+			[
+				'file_path' => $filePath,
+				'key' => $key,
+				'layer' => $layer,
+				'language' => $this->language,
+			] + $this->getRuntimeContext()
+		);
+	}
+
+
+	/**
+	 * Log that a resolved translation value is non-scalar.
+	 *
+	 * @param string $filePath Absolute language file path.
+	 * @param string $key Translation key.
+	 * @param string $layer Layer identifier.
+	 * @param mixed $value Resolved raw value.
+	 * @return void
+	 */
+	private function logNonScalarValue(string $filePath, string $key, string $layer, mixed $value): void {
+		$this->app->log->write(
+			self::LOG_FILE,
+			'txt.non_scalar_value',
+			'Translation value is non-scalar. Returning default value.',
+			[
+				'file_path' => $filePath,
+				'key' => $key,
+				'layer' => $layer,
+				'language' => $this->language,
+				'value_type' => \get_debug_type($value),
+			] + $this->getRuntimeContext()
+		);
+	}
+
+
+	/**
+	 * Build lightweight runtime context for log entries.
+	 *
+	 * @return array<string, string>
+	 */
+	private function getRuntimeContext(): array {
+		$requestUri = $_SERVER['REQUEST_URI'] ?? null;
+
+		if (\is_string($requestUri) && $requestUri !== '') {
+			return [
+				'runtime' => 'http',
+				'request_uri' => $requestUri,
+			];
+		}
+
+		return [
+			'runtime' => 'cli',
+		];
+	}
+
+
 }
