@@ -23,9 +23,9 @@ use CitOmni\Kernel\Service\BaseService;
  * BruteForce: Transport-agnostic brute force protection with per-context config.
  *
  * Provides a reusable API for tracking, evaluating, and clearing failed attempts
- * per identifier (e.g. email) and/or client IP. Each context (login, 2fa,
- * forgot_password, etc.) is independently configured via the `bruteforce` config
- * node. Subject values are normalized (trimmed, lowercased) and SHA-256 hashed
+ * per identifier (e.g. email) and/or client IP. Each context is independently
+ * configured via the `security.bruteforce` config node.
+ * Subject values are normalized (trimmed, lowercased) and SHA-256 hashed
  * before persistence to ensure consistent lookups and minimize data exposure.
  *
  * Behavior:
@@ -64,13 +64,15 @@ use CitOmni\Kernel\Service\BaseService;
  *   $this->app->bruteForce->clear('login', $email);
  *
  * Required config (example):
- *   'bruteforce' => [
- *       'login' => [
- *           'max_identifier_attempts' => 5,
- *           'max_ip_attempts'         => 25,
- *           'interval_minutes'        => 15,
- *           'retry_after_seconds'     => 900,
- *           'prune_after_seconds'     => 604800, // optional, default: 7 days
+ *   'security' => [
+ *       'bruteforce' => [
+ *           'default' => [
+ *               'max_identifier_attempts' => 5,
+ *               'max_ip_attempts'         => 25,
+ *               'interval_minutes'        => 15,
+ *               'retry_after_seconds'     => 900,
+ *               'prune_after_seconds'     => 604800, // optional, default: 7 days
+ *           ],
  *       ],
  *   ]
  *
@@ -90,28 +92,28 @@ final class BruteForce extends BaseService {
 
 
 	/**
-	 * One-time initialization. Reads and caches the bruteforce config node
-	 * as a plain array and instantiates the repository.
+	 * One-time initialization. Reads and caches the security.bruteforce config
+	 * node as a plain array and instantiates the repository.
 	 *
 	 * Behavior:
-	 * - Fails fast if the `bruteforce` config node is missing or empty.
+	 * - Fails fast if the `security.bruteforce` config node is missing or empty.
 	 * - Per-context validation is deferred to first access (resolveContext).
 	 *
 	 * @return void
 	 */
 	protected function init(): void {
-		if (!isset($this->app->cfg->bruteforce)) {
+		if (!isset($this->app->cfg->security) || !isset($this->app->cfg->security->bruteforce)) {
 			throw new BruteForceConfigException(
-				'Missing required config node: bruteforce. '
-				. 'Define at least one context (e.g. login, 2fa) under the bruteforce key.'
+				'Missing required config node: security.bruteforce. '
+				. 'Define at least one context (for example "default") under security.bruteforce.'
 			);
 		}
 
-		$this->contexts = $this->app->cfg->bruteforce->toArray();
+		$this->contexts = $this->app->cfg->security->bruteforce->toArray();
 
 		if ($this->contexts === []) {
 			throw new BruteForceConfigException(
-				'Config node bruteforce is empty. Define at least one context.'
+				'Config node security.bruteforce is empty. Define at least one context.'
 			);
 		}
 
@@ -156,7 +158,7 @@ final class BruteForce extends BaseService {
 	 * - BruteForceConfigException if the context is not configured.
 	 * - \InvalidArgumentException if $context is empty or both subjects are null/empty.
 	 *
-	 * @param string  $context    Context name matching a key in bruteforce config.
+	 * @param string  $context    Context name matching a key in security.bruteforce config.
 	 * @param ?string $identifier User identifier (email, username, etc.). Null for IP-only checks.
 	 * @param ?string $ip         Client IP address (IPv4 or IPv6). Null for identifier-only checks.
 	 *
@@ -424,7 +426,7 @@ final class BruteForce extends BaseService {
 	 * Iterates all configured contexts and removes rows where updated_at is
 	 * older than the context's prune_after_seconds (default: 604800 = 7 days).
 	 * After per-context cleanup, performs an orphan sweep: rows belonging to
-	 * contexts no longer in config are pruned at a 30-day threshold.
+	 * contexts no longer present in security.bruteforce are pruned at a 30-day threshold.
 	 *
 	 * Typical usage:
 	 *   Called from a CLI command on a cron schedule (e.g. daily).
@@ -547,7 +549,7 @@ final class BruteForce extends BaseService {
 		if (!isset($this->contexts[$context]) || !\is_array($this->contexts[$context])) {
 			throw new BruteForceConfigException(
 				"Brute force context '{$context}' is not configured. "
-				. 'Add it under the bruteforce config node.'
+				. 'Add it under security.bruteforce.'
 			);
 		}
 

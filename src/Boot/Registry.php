@@ -208,38 +208,26 @@ final class Registry {
 		],
 
 
+
 		/*
 		 *------------------------------------------------------------------
-		 * BRUTE FORCE PROTECTION
+		 * SECURITY
 		 *------------------------------------------------------------------
-		 */		
-		'bruteforce' => [
-			'login' => [
-				'max_identifier_attempts' => 5,
-				'max_ip_attempts' => 25,
-				'interval_minutes' => 15,
-				'retry_after_seconds' => 900,
-			],
-			'2fa' => [
-				'max_identifier_attempts' => 5,
-				'max_ip_attempts' => 20,
-				'interval_minutes' => 15,
-				'retry_after_seconds' => 900,
-			],
-			'forgot_password' => [
-				'max_identifier_attempts' => 3,
-				'max_ip_attempts' => 15,
-				'interval_minutes' => 30,
-				'retry_after_seconds' => 1800,
-			],
-			'reset_password' => [
-				'max_identifier_attempts' => 3,
-				'max_ip_attempts' => 15,
-				'interval_minutes' => 30,
-				'retry_after_seconds' => 1800,
-			],
-		],
+		 */
+		'security' => [
 
+			// Brute force protection
+			'bruteforce' => [
+				'default' => [
+					'max_identifier_attempts' => 5,
+					'max_ip_attempts'         => 25,
+					'interval_minutes'        => 15,
+					'retry_after_seconds'     => 900,
+					'prune_after_seconds'     => 604800, // optional, default: 7 days
+				],
+			],
+
+		],
 
 	];
 	

@@ -50,7 +50,7 @@ final class BruteForceRepository extends BaseRepository {
 	/**
 	 * findBySubject: Look up a single counter row by context and subject.
 	 *
-	 * @param string $context     Context name (e.g. 'login').
+	 * @param string $context     Context name (for example 'default').
 	 * @param string $subjectType 'identifier' or 'ip'.
 	 * @param string $subjectHash SHA-256 hex hash of the normalized subject value.
 	 *
