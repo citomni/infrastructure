@@ -91,6 +91,8 @@ final class Db extends BaseService {
 	private int $statementCacheLimit = self::DEFAULT_STMT_CACHE;
 	private int $queryCount = 0;
 
+
+
 	// -------------------------------------------------------------------------
 	// Initialization
 	// -------------------------------------------------------------------------
@@ -223,10 +225,13 @@ final class Db extends BaseService {
 			$this->statementCacheLimit = self::DEFAULT_STMT_CACHE;
 		}
 
-		// Global MySQLi reporting mode — affects all mysqli calls in this process.
+		// Global MySQLi reporting mode - affects all mysqli calls in this process.
 		// This is a driver-level flag, not per-connection. Set once per request.
 		\mysqli_report(\MYSQLI_REPORT_ERROR | \MYSQLI_REPORT_STRICT);
 	}
+
+
+
 
 	// -------------------------------------------------------------------------
 	// Read API
@@ -254,6 +259,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Fetch the first row as an associative array.
 	 *
@@ -276,6 +282,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Fetch all rows as associative arrays.
 	 *
@@ -296,6 +303,7 @@ final class Db extends BaseService {
 			$result->free();
 		}
 	}
+
 
 	/**
 	 * Count rows from an existing result object or a SQL string.
@@ -321,6 +329,7 @@ final class Db extends BaseService {
 			$result->free();
 		}
 	}
+
 
 	/**
 	 * Test whether at least one row exists for a WHERE clause.
@@ -349,6 +358,7 @@ final class Db extends BaseService {
 			$result->free();
 		}
 	}
+
 
 	/**
 	 * Execute a SELECT and return the raw mysqli_result.
@@ -395,13 +405,14 @@ final class Db extends BaseService {
 			throw $this->createQueryException($e->getMessage(), $sql, $params, (int)$e->getCode(), $e);
 		} finally {
 			// Close only when caching is disabled. With caching enabled, getPreparedStatement()
-			// always stores the statement in the cache — closing it here would corrupt the cache.
+			// always stores the statement in the cache - closing it here would corrupt the cache.
 			// With mysqlnd, the result is buffered and independent of the statement lifetime.
 			if ($this->statementCacheLimit === 0) {
 				try { $statement->close(); } catch (\Throwable) {}
 			}
 		}
 	}
+
 
 	/**
 	 * Execute a SELECT without relying on mysqlnd. Streams rows via a Generator.
@@ -417,7 +428,7 @@ final class Db extends BaseService {
 	 *   as $row for each column. A subsequent fetch() call updates both.
 	 *   This is safe for standard foreach usage where each row is processed before the
 	 *   generator advances. Do NOT accumulate yielded rows across iterations without
-	 *   an explicit scalar copy (e.g. array_map) — you will read the last fetched values.
+	 *   an explicit scalar copy (e.g. array_map) - you will read the last fetched values.
 	 *   The pattern is kept because it matches LiteMySQLi and is correct in all normal usage.
 	 * - Do not run concurrent generators on the same connection.
 	 *
@@ -476,6 +487,9 @@ final class Db extends BaseService {
 		}
 	}
 
+
+
+
 	// -------------------------------------------------------------------------
 	// Write API
 	// -------------------------------------------------------------------------
@@ -516,6 +530,7 @@ final class Db extends BaseService {
 			}
 		}
 	}
+
 
 	/**
 	 * Execute the same statement repeatedly with different parameter sets.
@@ -565,6 +580,7 @@ final class Db extends BaseService {
 		return $total;
 	}
 
+
 	/**
 	 * Insert a single row and return the insert id.
 	 *
@@ -600,6 +616,7 @@ final class Db extends BaseService {
 		$this->execute($sql, $params);
 		return $this->lastInsertId();
 	}
+
 
 	/**
 	 * Insert multiple rows efficiently.
@@ -637,7 +654,7 @@ final class Db extends BaseService {
 
 		// Validate all rows: O(1) count guard first, then one array_diff_key().
 		// Rationale: if count matches AND no expected key is missing from $row,
-		// then $row cannot contain extra keys — one diff is sufficient for both checks.
+		// then $row cannot contain extra keys - one diff is sufficient for both checks.
 		foreach ($rows as $idx => $row) {
 			if (!\is_array($row)) {
 				throw new DbQueryException('insertBatch(): row #' . $idx . ' is not an array.');
@@ -720,6 +737,7 @@ final class Db extends BaseService {
 		});
 	}
 
+
 	/**
 	 * Update rows and return the affected row count.
 	 *
@@ -758,6 +776,7 @@ final class Db extends BaseService {
 		return $this->execute($sql, $allParams);
 	}
 
+
 	/**
 	 * Delete rows and return the affected row count.
 	 *
@@ -779,6 +798,9 @@ final class Db extends BaseService {
 		$sql = 'DELETE FROM ' . $this->quoteIdentifierPath($table) . ' WHERE ' . $where;
 		return $this->execute($sql, $params);
 	}
+
+
+
 
 	// -------------------------------------------------------------------------
 	// Raw query escape hatches
@@ -810,6 +832,7 @@ final class Db extends BaseService {
 			throw $this->createQueryException($e->getMessage(), $sql, [], (int)$e->getCode(), $e);
 		}
 	}
+
 
 	/**
 	 * Execute multiple raw SQL statements via multi_query().
@@ -855,7 +878,7 @@ final class Db extends BaseService {
 			} while ($conn->more_results() && $conn->next_result());
 
 		} catch (\mysqli_sql_exception $e) {
-			// Free any results collected before the failure — caller never receives them.
+			// Free any results collected before the failure - caller never receives them.
 			foreach ($results as $r) {
 				if ($r instanceof \mysqli_result) {
 					try { $r->free(); } catch (\Throwable) {}
@@ -881,6 +904,9 @@ final class Db extends BaseService {
 		return $results;
 	}
 
+
+
+
 	// -------------------------------------------------------------------------
 	// Transactions
 	// -------------------------------------------------------------------------
@@ -904,6 +930,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Commit the current transaction.
 	 *
@@ -923,6 +950,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Roll back the current transaction.
 	 *
@@ -941,6 +969,7 @@ final class Db extends BaseService {
 			throw new DbQueryException($e->getMessage(), (int)$e->getCode(), $e);
 		}
 	}
+
 
 	/**
 	 * Run a callable inside a transaction. Commits on success, rolls back on any exception.
@@ -989,6 +1018,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Alias for transaction(). Provided for backward compatibility with LiteMySQLi callers.
 	 *
@@ -999,6 +1029,9 @@ final class Db extends BaseService {
 	public function easyTransaction(callable $callback): mixed {
 		return $this->transaction($callback);
 	}
+
+
+
 
 	// -------------------------------------------------------------------------
 	// Meta
@@ -1016,6 +1049,7 @@ final class Db extends BaseService {
 		return $this->connection !== null ? $this->connection->insert_id : 0;
 	}
 
+
 	/**
 	 * Return the affected row count from the most recent write statement.
 	 *
@@ -1027,6 +1061,7 @@ final class Db extends BaseService {
 	public function affectedRows(): int {
 		return $this->connection !== null ? $this->connection->affected_rows : 0;
 	}
+
 
 	/**
 	 * Return (and optionally reset) the internal query counter.
@@ -1041,6 +1076,7 @@ final class Db extends BaseService {
 		}
 		return $count;
 	}
+
 
 	/**
 	 * Return the last MySQLi error string from the active connection.
@@ -1059,6 +1095,7 @@ final class Db extends BaseService {
 		return ($err !== '') ? $err : null;
 	}
 
+
 	/**
 	 * Return the last MySQLi error code from the active connection.
 	 *
@@ -1071,6 +1108,9 @@ final class Db extends BaseService {
 	public function getLastErrorCode(): int {
 		return $this->connection !== null ? $this->connection->errno : 0;
 	}
+
+
+
 
 	// -------------------------------------------------------------------------
 	// Cache management
@@ -1104,6 +1144,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Close and clear all cached prepared statements.
 	 *
@@ -1120,6 +1161,7 @@ final class Db extends BaseService {
 		}
 		$this->statementCache = [];
 	}
+
 
 	/**
 	 * Close all cached statements and the active connection.
@@ -1151,8 +1193,11 @@ final class Db extends BaseService {
 		}
 	}
 
+
+
+
 	// -------------------------------------------------------------------------
-	// Private: connection lifecycle
+	// Private: Connection lifecycle
 	// -------------------------------------------------------------------------
 
 	/**
@@ -1206,6 +1251,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Assert that the connection is already open and return it.
 	 *
@@ -1223,6 +1269,7 @@ final class Db extends BaseService {
 		}
 		return $this->connection;
 	}
+
 
 	/**
 	 * Apply per-session settings after connect: sql_mode and time zone.
@@ -1255,7 +1302,7 @@ final class Db extends BaseService {
 			return;
 		}
 
-		// Always derive UTC offset from PHP's active timezone — same as LiteMySQLi.
+		// Always derive UTC offset from PHP's active timezone - same as LiteMySQLi.
 		$phpTz = \date_default_timezone_get();
 		if ($phpTz === '') {
 			return;
@@ -1273,6 +1320,7 @@ final class Db extends BaseService {
 			throw new DbConnectException('Failed to apply session time zone: ' . $e->getMessage(), 0, $e);
 		}
 	}
+
 
 	/**
 	 * Execute a session initialization statement using a one-off prepared statement.
@@ -1304,8 +1352,11 @@ final class Db extends BaseService {
 		}
 	}
 
+
+
+
 	// -------------------------------------------------------------------------
-	// Private: statement cache
+	// Private: Statement cache
 	// -------------------------------------------------------------------------
 
 	/**
@@ -1347,6 +1398,7 @@ final class Db extends BaseService {
 		return $stmt;
 	}
 
+
 	/**
 	 * Prepare a statement without adding it to the cache.
 	 *
@@ -1367,6 +1419,7 @@ final class Db extends BaseService {
 		}
 	}
 
+
 	/**
 	 * Discard any pending buffered result on a statement. No-op on clean statements.
 	 *
@@ -1382,8 +1435,11 @@ final class Db extends BaseService {
 		} catch (\Throwable) {}
 	}
 
+
+
+
 	// -------------------------------------------------------------------------
-	// Private: parameter binding
+	// Private: Parameter binding
 	// -------------------------------------------------------------------------
 
 	/**
@@ -1433,8 +1489,11 @@ final class Db extends BaseService {
 		}
 	}
 
+
+
+
 	// -------------------------------------------------------------------------
-	// Private: identifier quoting
+	// Private: Identifier quoting
 	// -------------------------------------------------------------------------
 
 	/**
@@ -1452,6 +1511,8 @@ final class Db extends BaseService {
 		}
 		return '`' . $identifier . '`';
 	}
+
+
 
 	/**
 	 * Validate and quote a dot-separated SQL identifier path (e.g., schema.table).
@@ -1476,8 +1537,12 @@ final class Db extends BaseService {
 		return \implode('.', $quoted);
 	}
 
+
+
+
+
 	// -------------------------------------------------------------------------
-	// Private: error context
+	// Private: Error context
 	// -------------------------------------------------------------------------
 
 	/**
@@ -1486,7 +1551,7 @@ final class Db extends BaseService {
 	 * Raw parameter values are intentionally excluded: they may contain passwords,
 	 * email addresses, tokens, or other sensitive runtime data that must not appear
 	 * in log files. Parameter types (e.g. [string, int, null]) are included instead
-	 * — sufficient for diagnosing type mismatches and placeholder count errors without
+	 * - sufficient for diagnosing type mismatches and placeholder count errors without
 	 * leaking data.
 	 *
 	 * @param string          $message  Driver error message.
@@ -1511,6 +1576,8 @@ final class Db extends BaseService {
 
 		return new DbQueryException($full, $code, $previous);
 	}
+
+
 
 	/**
 	 * Produce a compact type-only description of a parameter list.

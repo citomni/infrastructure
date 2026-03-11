@@ -33,6 +33,7 @@ final class Registry {
 		'mailer' => \CitOmni\Infrastructure\Service\Mailer::class,
 		'valueToSql' => \CitOmni\Infrastructure\Service\ValueToSql::class,
 		'valueFromSql' => \CitOmni\Infrastructure\Service\ValueFromSql::class,
+		'bruteForce' => \CitOmni\Infrastructure\Service\BruteForce::class,
 		
 		// FormatNumber has been deprecated and will be removed soon...
 		'formatNumber' => \CitOmni\Infrastructure\Service\FormatNumber::class,
@@ -170,8 +171,7 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 * LOCALE
 		 *------------------------------------------------------------------
-		 */
-		 
+		 */		 
 		'locale' => [
 			'format' => [
 
@@ -200,13 +200,46 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 * VIEW / CONTENT / TEMPLATE ENGINE 
 		 *------------------------------------------------------------------
-		 */
-		
+		 */		
 		'view' => [
 			'template_layers' => [
 				'citomni/infrastructure'   => \CITOMNI_APP_PATH . '/vendor/citomni/infrastructure/templates',
 			],
 		],
+
+
+		/*
+		 *------------------------------------------------------------------
+		 * BRUTE FORCE PROTECTION
+		 *------------------------------------------------------------------
+		 */		
+		'bruteforce' => [
+			'login' => [
+				'max_identifier_attempts' => 5,
+				'max_ip_attempts' => 25,
+				'interval_minutes' => 15,
+				'retry_after_seconds' => 900,
+			],
+			'2fa' => [
+				'max_identifier_attempts' => 5,
+				'max_ip_attempts' => 20,
+				'interval_minutes' => 15,
+				'retry_after_seconds' => 900,
+			],
+			'forgot_password' => [
+				'max_identifier_attempts' => 3,
+				'max_ip_attempts' => 15,
+				'interval_minutes' => 30,
+				'retry_after_seconds' => 1800,
+			],
+			'reset_password' => [
+				'max_identifier_attempts' => 3,
+				'max_ip_attempts' => 15,
+				'interval_minutes' => 30,
+				'retry_after_seconds' => 1800,
+			],
+		],
+
 
 	];
 	
