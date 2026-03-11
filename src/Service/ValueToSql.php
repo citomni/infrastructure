@@ -15,6 +15,9 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Service;
 
+use CitOmni\Infrastructure\Exception\ValueConfigurationException;
+use CitOmni\Infrastructure\Exception\ValueDefinitionException;
+use CitOmni\Infrastructure\Exception\ValueToSqlException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
@@ -64,8 +67,9 @@ use CitOmni\Kernel\Service\BaseService;
  *   $year  = $this->app->valueToSql->integer($post['year'], required: true, min: 1900, max: 2100); // 2026
  *   $date  = $this->app->valueToSql->date($post['moved_in']); // "2026-02-26" or null
  *
- * @throws \InvalidArgumentException On invalid input values.
- * @throws \RuntimeException On invalid locale separator configuration.
+ * @throws ValueToSqlException On invalid user input values.
+ * @throws ValueConfigurationException On missing or invalid locale configuration.
+ * @throws ValueDefinitionException On invalid normalization rule definitions or caller arguments.
  */
 final class ValueToSql extends BaseService {
 
@@ -76,17 +80,17 @@ final class ValueToSql extends BaseService {
 		
 		// Require locale.format to exist (use isset() to avoid triggering Cfg::__get()).
 		if (!isset($this->app->cfg->locale) || !isset($this->app->cfg->locale->format)) {
-			throw new \RuntimeException('Missing cfg: locale.format is required by ValueToSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format is required by ValueToSql.');
 		}
 
 		$format = $this->app->cfg->locale->format;
 
 		// Both keys must be set explicitly. No defaults: the caller owns locale policy.
 		if (!isset($format->decimal_separator)) {
-			throw new \RuntimeException('Missing cfg: locale.format.decimal_separator is required by ValueToSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_separator is required by ValueToSql.');
 		}
 		if (!isset($format->thousand_separator)) {
-			throw new \RuntimeException("Missing cfg: locale.format.thousand_separator is required by ValueToSql (use '' to disable grouping).");
+			throw new ValueConfigurationException("Missing cfg: locale.format.thousand_separator is required by ValueToSql (use '' to disable grouping).");
 		}
 
 		$dec = (string)$format->decimal_separator;
@@ -94,17 +98,17 @@ final class ValueToSql extends BaseService {
 
 		// Decimal separator must be a single non-empty char.
 		if ($dec === '' || \strlen($dec) !== 1) {
-			throw new \RuntimeException('Invalid cfg: locale.format.decimal_separator must be exactly 1 char.');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.decimal_separator must be exactly 1 char.');
 		}
 
 		// Thousand separator can be '' or a single char.
 		if ($tho !== '' && \strlen($tho) !== 1) {
-			throw new \RuntimeException("Invalid cfg: locale.format.thousand_separator must be exactly 1 char or ''.");
+			throw new ValueConfigurationException("Invalid cfg: locale.format.thousand_separator must be exactly 1 char or ''.");
 		}
 
 		// Must not be the same when thousand is enabled.
 		if ($tho !== '' && $tho === $dec) {
-			throw new \RuntimeException('Invalid cfg: thousand_separator must differ from decimal_separator.');
+			throw new ValueConfigurationException('Invalid cfg: thousand_separator must differ from decimal_separator.');
 		}
 
 		$this->decimalSeparator = $dec;
@@ -149,37 +153,37 @@ final class ValueToSql extends BaseService {
 	 * @param bool $allowNegative Whether negative values are allowed (Default true).
 	 * @return int|null Parsed integer or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid format or out-of-range value.
+	 * @throws ValueToSqlException On invalid format or out-of-range value.
 	 */
 	public function integer(mixed $value, bool $required = false, int $min = \PHP_INT_MIN, int $max = \PHP_INT_MAX, bool $allowNegative = true): ?int {
 		
 		// Reject non-scalar types and types that are not legitimate integer sources.
 		// Float is rejected: A float is not an integer; the caller must round/cast explicitly.
-		// Bool is rejected: A form value, not a PHP boolean.
+		// Bool is rejected: Form input should not arrive here as a native PHP boolean.
 		if (\is_float($value) || \is_bool($value) || \is_array($value) || \is_object($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_invalid_type','value_to_sql','citomni/infrastructure','Invalid integer type.'));
+			throw new ValueToSqlException('Invalid integer input.', 'err_value_to_sql_integer_invalid');
 		}
 
 		// Range sanity: User may pass reversed bounds.
 		if ($min > $max) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_invalid_range','value_to_sql','citomni/infrastructure','Invalid integer range (%MIN%..%MAX%).',['min' => $min, 'max' => $max]));
+			throw new ValueDefinitionException('Invalid integer range: $min must not be greater than $max.');
 		}
 
 		// Fast-path for native int (e.g. controller-side calculations).
 		if (\is_int($value)) {
 			if (!$allowNegative && $value < 0) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_negative_not_allowed','value_to_sql','citomni/infrastructure','Negative values are not allowed.'));
+				throw new ValueToSqlException('Negative values are not allowed.', 'err_value_to_sql_integer_negative_not_allowed');
 			}
 			if ($value < $min || $value > $max) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_out_of_range','value_to_sql','citomni/infrastructure','Integer out of range (%MIN%..%MAX%).',['min' => $min, 'max' => $max]));
+				throw new ValueToSqlException('Integer out of range.', 'err_value_to_sql_integer_out_of_range',	['min' => $min, 'max' => $max]);
 			}
 			return $value;
 		}
 
-		$s = $this->requireStringOrNull($value);
+		$s = $this->requireStringOrNull($value, 'err_value_to_sql_integer_invalid');
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Integer value is required.','err_value_to_sql_integer_required');
 			}
 			return null;
 		}
@@ -189,7 +193,7 @@ final class ValueToSql extends BaseService {
 
 		// Reject decimal separator strictly
 		if (\strpos($s, $decSep) !== false) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_invalid','value_to_sql','citomni/infrastructure','Invalid integer.'));
+			throw new ValueToSqlException('Invalid integer input.', 'err_value_to_sql_integer_invalid');
 		}
 
 		$negative = false;
@@ -197,13 +201,13 @@ final class ValueToSql extends BaseService {
 		if ($first === '-' || $first === '+') {
 			if ($first === '-') {
 				if (!$allowNegative) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_negative_not_allowed','value_to_sql','citomni/infrastructure','Negative values are not allowed.'));
+					throw new ValueToSqlException('Negative values are not allowed.','err_value_to_sql_integer_negative_not_allowed');
 				}
 				$negative = true;
 			}
 			$s = \substr($s, 1);
 			if ($s === '') {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_invalid','value_to_sql','citomni/infrastructure','Invalid integer.'));
+				throw new ValueToSqlException('Invalid integer input.', 'err_value_to_sql_integer_invalid');
 			}
 		}
 
@@ -214,7 +218,7 @@ final class ValueToSql extends BaseService {
 		// - any non-digit char
 		$digits = $this->stripAndValidateThousands($s, $thoSep, 'err_value_to_sql_integer_invalid');
 		if ($digits === '') {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_invalid','value_to_sql','citomni/infrastructure','Invalid integer.'));
+			throw new ValueToSqlException('Invalid integer input.', 'err_value_to_sql_integer_invalid');
 		}
 
 		// Strip leading zeros (keep at least one).
@@ -229,7 +233,7 @@ final class ValueToSql extends BaseService {
 		// 64-bit max is 19 digits, 32-bit max is 10 digits.
 		$maxDigits = (\PHP_INT_SIZE === 8) ? 19 : 10;
 		if ($len > $maxDigits) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_out_of_range','value_to_sql','citomni/infrastructure','Integer out of range (%MIN%..%MAX%).',['min' => $min, 'max' => $max]));
+			throw new ValueToSqlException('Integer out of range.','err_value_to_sql_integer_out_of_range',['min' => $min, 'max' => $max]);
 		}
 
 		if (!$negative) {
@@ -241,10 +245,10 @@ final class ValueToSql extends BaseService {
 			for ($i = 0; $i < $len; $i++) {
 				$digit = \ord($digits[$i]) - 48;
 				if ($digit < 0 || $digit > 9) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_invalid','value_to_sql','citomni/infrastructure','Invalid integer.'));
+					throw new ValueToSqlException('Invalid integer input.', 'err_value_to_sql_integer_invalid');
 				}
 				if ($val > $cut || ($val === $cut && $digit > $cutDigit)) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_out_of_range','value_to_sql','citomni/infrastructure','Integer out of range (%MIN%..%MAX%).',['min' => $min, 'max' => $max]));
+					throw new ValueToSqlException('Integer out of range.','err_value_to_sql_integer_out_of_range',['min' => $min, 'max' => $max]);
 				}
 				$val = $val * 10 + $digit;
 			}
@@ -258,7 +262,7 @@ final class ValueToSql extends BaseService {
 			for ($i = 0; $i < $len; $i++) {
 				$digit = \ord($digits[$i]) - 48;
 				if ($digit < 0 || $digit > 9) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_invalid','value_to_sql','citomni/infrastructure','Invalid integer.'));
+					throw new ValueToSqlException('Invalid integer input.', 'err_value_to_sql_integer_invalid');
 				}
 
 				// Before: val = val * 10 - digit
@@ -266,7 +270,7 @@ final class ValueToSql extends BaseService {
 				// - val < cut, or
 				// - val == cut and digit > cutDigit
 				if ($val < $cut || ($val === $cut && $digit > $cutDigit)) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_out_of_range','value_to_sql','citomni/infrastructure','Integer out of range (%MIN%..%MAX%).',['min' => $min, 'max' => $max]));
+					throw new ValueToSqlException('Integer out of range.','err_value_to_sql_integer_out_of_range',['min' => $min, 'max' => $max]);
 				}
 
 				$val = $val * 10 - $digit;
@@ -274,7 +278,7 @@ final class ValueToSql extends BaseService {
 		}
 
 		if ($val < $min || $val > $max) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_integer_out_of_range','value_to_sql','citomni/infrastructure','Integer out of range (%MIN%..%MAX%).',['min' => $min, 'max' => $max]));
+			throw new ValueToSqlException('Integer out of range.','err_value_to_sql_integer_out_of_range',['min' => $min, 'max' => $max]);
 		}
 
 		return $val;
@@ -335,24 +339,24 @@ final class ValueToSql extends BaseService {
 	 * @param bool $allowNegative Whether negative values are allowed (default true).
 	 * @return string|null Normalized SQL decimal string or null if empty and not required.
 	 *
-	 * @throws \InvalidArgumentException On invalid format, invalid scale, disallowed negative values,
-	 *                                  or when required=true and input is empty.
+	 * @throws ValueToSqlException On invalid format, invalid scale, disallowed negative values,
+	 *                             or when required=true and input is empty.
 	 */
 	public function decimal(mixed $value, bool $required = false, int $scale = 2, bool $allowNegative = true): ?string {
 		
 		if ($scale < 0 || $scale > 18) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_scale_range','value_to_sql','citomni/infrastructure','Invalid decimal scale (%SCALE%).',['scale' => $scale]));
+			throw new ValueDefinitionException('Invalid decimal scale: $scale must be in range 0..18.');
 		}		
 		
 		// Explicitly reject arrays/objects early (do not treat as "missing").
 		if (\is_array($value) || \is_object($value) || \is_bool($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_invalid_type','value_to_sql','citomni/infrastructure','Invalid decimal type.'));
+			throw new ValueToSqlException('Invalid decimal type.','err_value_to_sql_decimal_invalid_type');
 		}
 		
 		// Numeric fast-path: Supports controller-side calculations deterministically.
 		if (\is_int($value)) {
 			if (!$allowNegative && $value < 0) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_negative_not_allowed','value_to_sql','citomni/infrastructure','Negative values are not allowed.'));
+				throw new ValueToSqlException('Negative values are not allowed.','err_value_to_sql_decimal_negative_not_allowed');
 			}
 
 			// int -> string, then reuse existing scale logic by synthesizing normalized form.
@@ -372,10 +376,10 @@ final class ValueToSql extends BaseService {
 
 		if (\is_float($value)) {
 			if (!\is_finite($value)) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_invalid','value_to_sql','citomni/infrastructure','Invalid decimal.'));
+				throw new ValueToSqlException('Invalid decimal.','err_value_to_sql_decimal_invalid');
 			}
 			if (!$allowNegative && $value < 0) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_negative_not_allowed','value_to_sql','citomni/infrastructure','Negative values are not allowed.'));
+				throw new ValueToSqlException('Negative values are not allowed.','err_value_to_sql_decimal_negative_not_allowed');
 			}
 
 			// Round explicitly to scale (float is approximate; policy must be explicit).
@@ -397,10 +401,10 @@ final class ValueToSql extends BaseService {
 			return $out;
 		}
 		
-		$s = $this->requireStringOrNull($value);
+		$s = $this->requireStringOrNull($value, 'err_value_to_sql_decimal_invalid');
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Decimal value is required.','err_value_to_sql_decimal_required');
 			}
 			return null;
 		}
@@ -430,7 +434,7 @@ final class ValueToSql extends BaseService {
 		// Enforce scale without rounding.
 		$fracLen = \strlen($fracPart);
 		if ($fracLen > $scale) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_too_many_decimals','value_to_sql','citomni/infrastructure','Too many decimals (max %SCALE%).',['scale' => $scale]));
+			throw new ValueToSqlException('Too many decimals.','err_value_to_sql_decimal_too_many_decimals',['scale' => $scale]);
 		}
 
 		if ($scale > 0) {
@@ -450,7 +454,7 @@ final class ValueToSql extends BaseService {
 		if ($fracPart !== '') {
 			// Allow "0", "00", "000" etc. when scale is 0 (no fractional value).
 			if (\trim($fracPart, '0') !== '') {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_scale_zero_has_fraction','value_to_sql','citomni/infrastructure','Fraction not allowed when scale is 0.'));
+				throw new ValueToSqlException('Fraction not allowed when scale is 0.','err_value_to_sql_decimal_scale_zero_has_fraction');
 			}
 		}
 		if ($sign === '-' && $intPart === '0') {
@@ -492,12 +496,12 @@ final class ValueToSql extends BaseService {
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return int|null 1 or 0, or null if empty and not required.
 	 *
-	 * @throws \InvalidArgumentException On invalid value.
+	 * @throws ValueToSqlException On invalid value.
 	 */
 	public function boolean(mixed $value, bool $required = false): ?int {
 		
 		if (\is_float($value) || \is_array($value) || \is_object($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_boolean_invalid_type','value_to_sql','citomni/infrastructure','Invalid boolean type.'));
+			throw new ValueToSqlException('Invalid boolean type.','err_value_to_sql_boolean_invalid_type');
 		}
 		
 		// Fast-path for real booleans.
@@ -510,14 +514,14 @@ final class ValueToSql extends BaseService {
 			if ($value === 0 || $value === 1) {
 				return $value;
 			}
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_boolean_invalid','value_to_sql','citomni/infrastructure','Invalid boolean value.'));
+			throw new ValueToSqlException('Invalid boolean value.','err_value_to_sql_boolean_invalid');
 		}
 
-		$s = $this->requireStringOrNull($value);
+		$s = $this->requireStringOrNull($value, 'err_value_to_sql_boolean_invalid');
 
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_boolean_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Boolean value is required.','err_value_to_sql_boolean_required');
 			}
 			return null;
 		}
@@ -534,7 +538,7 @@ final class ValueToSql extends BaseService {
 			return 0;
 		}
 
-		throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_boolean_invalid','value_to_sql','citomni/infrastructure','Invalid boolean value.'));
+		throw new ValueToSqlException('Invalid boolean value.','err_value_to_sql_boolean_invalid');
 	}
 
 
@@ -565,15 +569,15 @@ final class ValueToSql extends BaseService {
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return string|null SQL date string ("YYYY-MM-DD") or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid date or when required and empty.
+	 * @throws ValueToSqlException On invalid date or when required and empty.
 	 */
 	public function date(mixed $value, bool $required = false): ?string {
 		
-		$s = $this->requireStringOrNull($value);		
+		$s = $this->requireStringOrNull($value, 'err_value_to_sql_date_invalid');
 		
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_date_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Date value is required.','err_value_to_sql_date_required');
 			}
 			return null;
 		}
@@ -593,11 +597,11 @@ final class ValueToSql extends BaseService {
 			$y = (int)\substr($s, 6, 4);
 
 		} else {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_date_invalid_format','value_to_sql','citomni/infrastructure','Invalid date format.'));
+			throw new ValueToSqlException('Invalid date format.','err_value_to_sql_date_invalid_format');
 		}
 
 		if (!\checkdate($m, $d, $y)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_date_invalid','value_to_sql','citomni/infrastructure','Invalid date.'));
+			throw new ValueToSqlException('Invalid date.','err_value_to_sql_date_invalid');
 		}
 
 		return \sprintf('%04d-%02d-%02d', $y, $m, $d);
@@ -632,15 +636,15 @@ final class ValueToSql extends BaseService {
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return string|null SQL time string ("HH:MM:SS") or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid time or when required and empty.
+	 * @throws ValueToSqlException On invalid time or when required and empty.
 	 */
 	public function time(mixed $value, bool $required = false): ?string {
 		
-		$s = $this->requireStringOrNull($value);
+		$s = $this->requireStringOrNull($value, 'err_value_to_sql_time_invalid');
 		
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_time_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Time value is required.','err_value_to_sql_time_required');
 			}
 			return null;
 		}
@@ -649,9 +653,7 @@ final class ValueToSql extends BaseService {
 		// - "HH:MM"
 		// - "HH:MM:SS"
 		if (\preg_match('/^\d{2}:\d{2}(:\d{2})?$/', $s) !== 1) {
-			throw new \InvalidArgumentException(
-				$this->app->txt->get('err_value_to_sql_time_invalid', 'value_to_sql', 'citomni/infrastructure', 'Invalid time format.')
-			);
+			throw new ValueToSqlException('Invalid time format.','err_value_to_sql_time_invalid_format');
 		}
 
 		$hh = (int)\substr($s, 0, 2);
@@ -659,9 +661,7 @@ final class ValueToSql extends BaseService {
 		$ss = (\strlen($s) === 8) ? (int)\substr($s, 6, 2) : 0;
 
 		if ($hh < 0 || $hh > 23 || $mm < 0 || $mm > 59 || $ss < 0 || $ss > 59) {
-			throw new \InvalidArgumentException(
-				$this->app->txt->get('err_value_to_sql_time_invalid', 'value_to_sql', 'citomni/infrastructure', 'Invalid time.')
-			);
+			throw new ValueToSqlException('Invalid time.','err_value_to_sql_time_invalid');
 		}
 
 		return \sprintf('%02d:%02d:%02d', $hh, $mm, $ss);
@@ -700,15 +700,15 @@ final class ValueToSql extends BaseService {
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return string|null SQL datetime string ("YYYY-MM-DD HH:MM:SS") or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid datetime or when required and empty.
+	 * @throws ValueToSqlException On invalid datetime or when required and empty.
 	 */
 	public function dateTime(mixed $value, bool $required = false): ?string {
 		
-		$s = $this->requireStringOrNull($value);
+		$s = $this->requireStringOrNull($value, 'err_value_to_sql_datetime_invalid');
 		
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_datetime_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Datetime value is required.','err_value_to_sql_datetime_required');
 			}
 			return null;
 		}
@@ -723,7 +723,7 @@ final class ValueToSql extends BaseService {
 		// - "YYYY-MM-DD HH:MM:SS"
 		$matches = [];
 		if (\preg_match('/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?$/', $s, $matches) !== 1) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_datetime_invalid','value_to_sql','citomni/infrastructure','Invalid datetime format.'));
+			throw new ValueToSqlException('Invalid datetime format.','err_value_to_sql_datetime_invalid_format');
 		}
 
 		$y = (int)$matches[1];
@@ -736,7 +736,7 @@ final class ValueToSql extends BaseService {
 		$ss = ($ssRaw !== '') ? (int)$ssRaw : 0;		
 
 		if (!\checkdate($m, $d, $y) || $hh < 0 || $hh > 23 || $mm < 0 || $mm > 59 || $ss < 0 || $ss > 59) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_datetime_invalid','value_to_sql','citomni/infrastructure','Invalid datetime.'));
+			throw new ValueToSqlException('Invalid datetime.','err_value_to_sql_datetime_invalid');
 		}
 
 		return \sprintf('%04d-%02d-%02d %02d:%02d:%02d', $y, $m, $d, $hh, $mm, $ss);
@@ -773,17 +773,17 @@ final class ValueToSql extends BaseService {
 	 * @param bool $trim Whether to trim whitespace (Default true).
 	 * @return string|null Normalized string or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid type, when required and empty, or on max length violation.
+	 * @throws ValueToSqlException On invalid type, when required and empty, or on max length violation.
 	 */
 	public function text(mixed $value, bool $required = false, int $maxLen = 0, bool $trim = true): ?string {
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_text_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Text value is required.','err_value_to_sql_text_required');
 			}
 			return null;
 		}
 		if (!\is_string($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_text_invalid_type','value_to_sql','citomni/infrastructure','Invalid text type.'));
+			throw new ValueToSqlException('Invalid text type.','err_value_to_sql_text_invalid_type');
 		}
 
 		$s = $value;
@@ -794,13 +794,17 @@ final class ValueToSql extends BaseService {
 
 		if ($s === '') {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_text_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Text value is required.','err_value_to_sql_text_required');
 			}
 			return null;
 		}
 
+		if ($maxLen < 0) {
+			throw new ValueDefinitionException('Invalid text maxLen: $maxLen must be 0 or greater.');
+		}
+
 		if ($maxLen > 0 && \strlen($s) > $maxLen) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_text_too_long','value_to_sql','citomni/infrastructure','Text is too long (max %MAX%).',['max' => $maxLen]));
+			throw new ValueToSqlException('Text is too long.','err_value_to_sql_text_too_long',['max' => $maxLen]);
 		}
 
 		return $s;
@@ -837,31 +841,36 @@ final class ValueToSql extends BaseService {
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return string|null Allowed string or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid type, invalid value, or invalid $allowed contract.
+	 * @throws ValueToSqlException On invalid type, invalid value, or invalid $allowed contract.
 	 */
 	public function enum(mixed $value, array $allowed, bool $required = false): ?string {
+
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_enum_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Enum value is required.','err_value_to_sql_enum_required');
 			}
 			return null;
 		}
 		if (!\is_string($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_enum_invalid_type','value_to_sql','citomni/infrastructure','Invalid enum type.'));
+			throw new ValueToSqlException('Invalid enum type.','err_value_to_sql_enum_invalid_type');
 		}
 
 		$s = \trim($value);
 		if ($s === '') {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_enum_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('Enum value is required.','err_value_to_sql_enum_required');
 			}
 			return null;
 		}
 
 		// Fail fast if $allowed is misconfigured (developer contract).
+		if ($allowed === []) {
+			throw new ValueDefinitionException('Invalid enum definition: $allowed must not be empty.');
+		}
+		
 		foreach ($allowed as $a) {
 			if (!\is_string($a)) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_enum_allowed_invalid_type','value_to_sql','citomni/infrastructure','Invalid enum allowed list type.'));
+				throw new ValueDefinitionException('Invalid enum definition: all $allowed values must be strings.');
 			}
 		}
 
@@ -869,7 +878,7 @@ final class ValueToSql extends BaseService {
 			return $s;
 		}
 
-		throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_enum_invalid','value_to_sql','citomni/infrastructure','Invalid value.'));
+		throw new ValueToSqlException('Invalid enum value.','err_value_to_sql_enum_invalid');
 
 	}
 
@@ -877,16 +886,20 @@ final class ValueToSql extends BaseService {
 	/**
 	 * Normalize a UI value to a JSON string for SQL binding.
 	 *
+	 * Accepted inputs:
+	 * - A JSON string (validated and returned as-is after trim)
+	 * - A PHP array/object (encoded to JSON)
+	 *
 	 * @param mixed $value UI input (array/object/string).
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return string|null JSON string or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid JSON or unsupported input.
+	 * @throws ValueToSqlException On invalid JSON or unsupported input.
 	 */
 	public function json(mixed $value, bool $required = false): ?string {
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_json_required','value_to_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueToSqlException('JSON value is required.','err_value_to_sql_json_required');
 			}
 			return null;
 		}
@@ -895,7 +908,7 @@ final class ValueToSql extends BaseService {
 			$s = \trim($value);
 			if ($s === '') {
 				if ($required) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_json_required','value_to_sql','citomni/infrastructure','Value is required.'));
+					throw new ValueToSqlException('JSON value is required.','err_value_to_sql_json_required');
 				}
 				return null;
 			}
@@ -904,19 +917,19 @@ final class ValueToSql extends BaseService {
 			try {
 				\json_decode($s, true, 512, \JSON_THROW_ON_ERROR);
 			} catch (\JsonException) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_json_invalid','value_to_sql','citomni/infrastructure','Invalid JSON.'));
+				throw new ValueToSqlException('Invalid JSON.','err_value_to_sql_json_invalid');
 			}
 			return $s;
 		}
 
 		if (!\is_array($value) && !\is_object($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_json_invalid_type','value_to_sql','citomni/infrastructure','Invalid JSON type.'));
+			throw new ValueToSqlException('Invalid JSON type.','err_value_to_sql_json_invalid_type');
 		}
 
 		try {
 			$s = \json_encode($value, \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_THROW_ON_ERROR);
 		} catch (\JsonException) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_json_encode_failed','value_to_sql','citomni/infrastructure','JSON encoding failed.'));
+			throw new ValueToSqlException('JSON encoding failed.','err_value_to_sql_json_encode_failed');
 		}
 
 		return $s;
@@ -942,23 +955,18 @@ final class ValueToSql extends BaseService {
 	 * - No silent coercion of unexpected types.
 	 * - Whitespace-only input is treated as "missing" (null).
 	 *
-	 * Notes:
-	 * - Use this in methods where non-string input is a programmer error
-	 *   and must fail fast.
-	 * - Differs from soft string helpers that may treat non-string input
-	 *   as null without throwing.
-	 *
 	 * @param mixed $value UI input value.
+	 * @param string $invalidKey Txt/message key used when the value type is invalid.
 	 * @return string|null Trimmed string or null if empty.
 	 *
-	 * @throws \InvalidArgumentException When $value is not a string and not null.
+	 * @throws ValueToSqlException When $value is not a string and not null.
 	 */
-	private function requireStringOrNull(mixed $value): ?string {
+	private function requireStringOrNull(mixed $value, string $invalidKey): ?string {
 		if ($value === null) {
 			return null;
 		}
 		if (!\is_string($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_invalid_type','value_to_sql','citomni/infrastructure','Value must be a string.'));
+			throw new ValueToSqlException('Invalid input type.', $invalidKey);
 		}
 		$s = \trim($value);
 		return ($s === '') ? null : $s;
@@ -974,7 +982,8 @@ final class ValueToSql extends BaseService {
 	 *   - thousand separator: $this->thousandSeparator (single char or '', optional)
 	 * - No guessing:
 	 *   - Only the configured separators are accepted.
-	 *   - Any other separator characters are rejected.
+	 *   - Exception: If the configured thousand separator is a regular space, NBSP and narrow NBSP
+	 *     are normalized to a regular space before validation to tolerate common copy/paste input.
 	 * - Whitespace:
 	 *   - Leading/trailing whitespace is trimmed.
 	 *   - Internal whitespace is not removed unless it is the configured thousand separator.
@@ -993,7 +1002,7 @@ final class ValueToSql extends BaseService {
 	 * @param bool $allowNegative Whether negative values are allowed.
 	 * @return string Normalized SQL decimal string using '.' as decimal separator.
 	 *
-	 * @throws \InvalidArgumentException On invalid format or disallowed value.
+	 * @throws ValueToSqlException On invalid format or disallowed value.
 	 */
 	private function normalizeDecimalString(string $s, bool $allowNegative): string {
 		$decSep = $this->decimalSeparator;
@@ -1006,12 +1015,12 @@ final class ValueToSql extends BaseService {
 			$sign = $first;
 			$s = \substr($s, 1);
 			if ($s === '') {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_invalid','value_to_sql','citomni/infrastructure','Invalid decimal.'));
+				throw new ValueToSqlException('Invalid decimal.','err_value_to_sql_decimal_invalid');
 			}
 		}
 
 		if ($sign === '-' && !$allowNegative) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_negative_not_allowed','value_to_sql','citomni/infrastructure','Negative values are not allowed.'));
+			throw new ValueToSqlException('Negative values are not allowed.','err_value_to_sql_decimal_negative_not_allowed');
 		}
 
 		// Split on decimal separator (cfg). Must appear at most once.
@@ -1021,23 +1030,23 @@ final class ValueToSql extends BaseService {
 			$fracRaw = '';
 		} else {
 			if (\strpos($s, $decSep, $decPos + 1) !== false) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_invalid','value_to_sql','citomni/infrastructure','Invalid decimal.'));
+				throw new ValueToSqlException('Invalid decimal.','err_value_to_sql_decimal_invalid');
 			}
 			$intRaw = \substr($s, 0, $decPos);
 			$fracRaw = \substr($s, $decPos + 1);
 		}
 
 		if ($intRaw === '' && $fracRaw === '') {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_invalid','value_to_sql','citomni/infrastructure','Invalid decimal.'));
+			throw new ValueToSqlException('Invalid decimal.','err_value_to_sql_decimal_invalid');
 		}
 
 		// Fraction: must be digits only (or empty). Thousand separator is never allowed here.
 		if ($fracRaw !== '') {
 			if ($thoSep !== '' && \strpos($fracRaw, $thoSep) !== false) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_invalid','value_to_sql','citomni/infrastructure','Invalid decimal.'));
+				throw new ValueToSqlException('Invalid decimal.','err_value_to_sql_decimal_invalid');
 			}
 			if (!\ctype_digit($fracRaw)) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_to_sql_decimal_invalid','value_to_sql','citomni/infrastructure','Invalid decimal.'));
+				throw new ValueToSqlException('Invalid decimal.','err_value_to_sql_decimal_invalid');
 			}
 		}
 
@@ -1079,7 +1088,7 @@ final class ValueToSql extends BaseService {
 
 		if ($thoSep === '') {
 			if (!\ctype_digit($raw)) {
-				throw new \InvalidArgumentException($this->app->txt->get($errKey,'value_to_sql','citomni/infrastructure','Invalid format.'));
+				throw new ValueToSqlException('Invalid numeric format.',$errKey);
 			}
 			return $raw;
 		}
@@ -1098,7 +1107,7 @@ final class ValueToSql extends BaseService {
 
 		if ($cnt === 1) {
 			if (!\ctype_digit($raw)) {
-				throw new \InvalidArgumentException($this->app->txt->get($errKey,'value_to_sql','citomni/infrastructure','Invalid format.'));
+				throw new ValueToSqlException('Invalid numeric format.',$errKey);
 			}
 			return $raw;
 		}
@@ -1106,18 +1115,18 @@ final class ValueToSql extends BaseService {
 		for ($i = 0; $i < $cnt; $i++) {
 			$p = $parts[$i];
 			if ($p === '' || !\ctype_digit($p)) {
-				throw new \InvalidArgumentException($this->app->txt->get($errKey,'value_to_sql','citomni/infrastructure','Invalid format.'));
+				throw new ValueToSqlException('Invalid numeric format.',$errKey);
 			}
 		}
 
 		// First group 1-3 digits, rest exactly 3 digits.
 		$firstLen = \strlen($parts[0]);
 		if ($firstLen < 1 || $firstLen > 3) {
-			throw new \InvalidArgumentException($this->app->txt->get($errKey,'value_to_sql','citomni/infrastructure','Invalid format.'));
+			throw new ValueToSqlException('Invalid numeric format.',$errKey);
 		}
 		for ($i = 1; $i < $cnt; $i++) {
 			if (\strlen($parts[$i]) !== 3) {
-				throw new \InvalidArgumentException($this->app->txt->get($errKey,'value_to_sql','citomni/infrastructure','Invalid format.'));
+				throw new ValueToSqlException('Invalid numeric format.',$errKey);
 			}
 		}
 

@@ -15,6 +15,9 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Service;
 
+use CitOmni\Infrastructure\Exception\ValueConfigurationException;
+use CitOmni\Infrastructure\Exception\ValueDefinitionException;
+use CitOmni\Infrastructure\Exception\ValueFromSqlException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
@@ -47,8 +50,9 @@ use CitOmni\Kernel\Service\BaseService;
  *   Thousand separators are not allowed in SQL input.
  * - BIGINT integers may arrive as strings; integer formatting works on digits as strings to avoid overflow.
  *
- * @throws \InvalidArgumentException On invalid SQL values or unsupported/invalid cfg values.
- * @throws \RuntimeException On missing locale cfg or invalid locale separator configuration.
+ * @throws ValueFromSqlException On invalid SQL values.
+ * @throws ValueConfigurationException On missing or invalid locale configuration.
+ * @throws ValueDefinitionException On invalid method arguments or unsupported formatting rules.
  */
 final class ValueFromSql extends BaseService {
 
@@ -71,83 +75,83 @@ final class ValueFromSql extends BaseService {
 
 		// Require locale.format to exist (use isset() to avoid triggering Cfg::__get()).
 		if (!isset($this->app->cfg->locale) || !isset($this->app->cfg->locale->format)) {
-			throw new \RuntimeException('Missing cfg: locale.format is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format is required by ValueFromSql.');
 		}
 
 		$format = $this->app->cfg->locale->format;
 
 		// Required: Separators.
 		if (!isset($format->decimal_separator)) {
-			throw new \RuntimeException('Missing cfg: locale.format.decimal_separator is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_separator is required by ValueFromSql.');
 		}
 		if (!isset($format->thousand_separator)) {
-			throw new \RuntimeException("Missing cfg: locale.format.thousand_separator is required by ValueFromSql (use '' to disable).");
+			throw new ValueConfigurationException("Missing cfg: locale.format.thousand_separator is required by ValueFromSql (use '' to disable).");
 		}
 
 		$dec = (string)$format->decimal_separator;
 		$tho = (string)$format->thousand_separator;
 
 		if ($dec === '' || \strlen($dec) !== 1) {
-			throw new \RuntimeException('Invalid cfg: locale.format.decimal_separator must be exactly 1 char.');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.decimal_separator must be exactly 1 char.');
 		}
 		if ($tho !== '' && \strlen($tho) !== 1) {
-			throw new \RuntimeException("Invalid cfg: locale.format.thousand_separator must be exactly 1 char or ''.");
+			throw new ValueConfigurationException("Invalid cfg: locale.format.thousand_separator must be exactly 1 char or ''.");
 		}
 		if ($tho !== '' && $tho === $dec) {
-			throw new \RuntimeException('Invalid cfg: thousand_separator must differ from decimal_separator.');
+			throw new ValueConfigurationException('Invalid cfg: thousand_separator must differ from decimal_separator.');
 		}
 
 		// Required: Grouping.
 		if (!isset($format->group_thousands)) {
-			throw new \RuntimeException('Missing cfg: locale.format.group_thousands is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.group_thousands is required by ValueFromSql.');
 		}
 		$group = $format->group_thousands;
 		if (!\is_bool($group)) {
-			throw new \RuntimeException('Invalid cfg: locale.format.group_thousands must be boolean.');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.group_thousands must be boolean.');
 		}
 
 		// Required: Decimal policy.
 		if (!isset($format->decimal_scale)) {
-			throw new \RuntimeException('Missing cfg: locale.format.decimal_scale is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_scale is required by ValueFromSql.');
 		}
 		if (!isset($format->decimal_string_rounding)) {
-			throw new \RuntimeException('Missing cfg: locale.format.decimal_string_rounding is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_string_rounding is required by ValueFromSql.');
 		}
 		if (!isset($format->decimal_trim_trailing_zeros)) {
-			throw new \RuntimeException('Missing cfg: locale.format.decimal_trim_trailing_zeros is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_trim_trailing_zeros is required by ValueFromSql.');
 		}
 
 		$scale = $format->decimal_scale;
 		if (!\is_int($scale) || $scale < 0 || $scale > 18) {
-			throw new \RuntimeException('Invalid cfg: locale.format.decimal_scale must be int in range 0..18.');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.decimal_scale must be int in range 0..18.');
 		}
 
 		$round = (string)$format->decimal_string_rounding;
 		if ($round !== self::ROUND_FAIL && $round !== self::ROUND_TRUNCATE && $round !== self::ROUND_HALF_UP) {
-			throw new \RuntimeException('Invalid cfg: locale.format.decimal_string_rounding must be one of: "fail", "truncate", "half_up".');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.decimal_string_rounding must be one of: "fail", "truncate", "half_up".');
 		}
 
 		$trimZeros = $format->decimal_trim_trailing_zeros;
 		if (!\is_bool($trimZeros)) {
-			throw new \RuntimeException('Invalid cfg: locale.format.decimal_trim_trailing_zeros must be boolean.');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.decimal_trim_trailing_zeros must be boolean.');
 		}
 
 		// Required: HTML time/datetime-local policy.
 		if (!isset($format->time_include_seconds)) {
-			throw new \RuntimeException('Missing cfg: locale.format.time_include_seconds is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.time_include_seconds is required by ValueFromSql.');
 		}
 		if (!isset($format->datetime_local_include_seconds)) {
-			throw new \RuntimeException('Missing cfg: locale.format.datetime_local_include_seconds is required by ValueFromSql.');
+			throw new ValueConfigurationException('Missing cfg: locale.format.datetime_local_include_seconds is required by ValueFromSql.');
 		}
 
 		$timeSec = $format->time_include_seconds;
 		if (!\is_bool($timeSec)) {
-			throw new \RuntimeException('Invalid cfg: locale.format.time_include_seconds must be boolean.');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.time_include_seconds must be boolean.');
 		}
 
 		$dtlSec = $format->datetime_local_include_seconds;
 		if (!\is_bool($dtlSec)) {
-			throw new \RuntimeException('Invalid cfg: locale.format.datetime_local_include_seconds must be boolean.');
+			throw new ValueConfigurationException('Invalid cfg: locale.format.datetime_local_include_seconds must be boolean.');
 		}
 
 		$this->decimalSeparator = $dec;
@@ -160,8 +164,6 @@ final class ValueFromSql extends BaseService {
 
 		$this->timeIncludeSeconds = $timeSec;
 		$this->dateTimeLocalIncludeSeconds = $dtlSec;
-		
-		$this->options = [];
 	}
 
 
@@ -184,26 +186,26 @@ final class ValueFromSql extends BaseService {
 	 * @param bool|null $groupThousands Override grouping (Default null = cfg).
 	 * @return string|null UI formatted integer string or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid type/format or when required=true and empty.
+	 * @throws ValueFromSqlException On invalid type/format or when required=true and empty.
 	 */
 	public function integer(mixed $value, bool $required = false, ?bool $groupThousands = null): ?string {
 
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_integer_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Integer value is required.', 'err_value_from_sql_integer_required');
 			}
 			return null;
 		}
 
 		if (\is_bool($value) || \is_float($value) || \is_array($value) || \is_object($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_integer_invalid_type','value_from_sql','citomni/infrastructure','Invalid integer type.'));
+			throw new ValueFromSqlException('Invalid integer type.', 'err_value_from_sql_integer_invalid_type');
 		}
 
-		$s = $this->requireTrimmedStringOrNull($value);
+		$s = $this->requireTrimmedStringOrNull($value, 'err_value_from_sql_integer_invalid_type');
 
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_integer_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Integer value is required.', 'err_value_from_sql_integer_required');
 			}
 			return null;
 		}
@@ -216,12 +218,12 @@ final class ValueFromSql extends BaseService {
 			}
 			$s = \substr($s, 1);
 			if ($s === '') {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_integer_invalid','value_from_sql','citomni/infrastructure','Invalid integer.'));
+				throw new ValueFromSqlException('Invalid integer.', 'err_value_from_sql_integer_invalid');
 			}
 		}
 
 		if (!\ctype_digit($s)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_integer_invalid','value_from_sql','citomni/infrastructure','Invalid integer.'));
+			throw new ValueFromSqlException('Invalid integer.', 'err_value_from_sql_integer_invalid');
 		}
 
 		$digits = \ltrim($s, '0');
@@ -268,13 +270,14 @@ final class ValueFromSql extends BaseService {
 	 * @param string|null $rounding Override rounding mode (Default null = cfg).
 	 * @return string|null Locale-formatted decimal string or null.
 	 *
-	 * @throws \InvalidArgumentException On invalid type, invalid SQL format, or policy violations.
+	 * @throws ValueFromSqlException On invalid type, invalid SQL format, or policy violations.
+	 * @throws ValueDefinitionException On invalid override arguments.
 	 */
 	public function decimal(mixed $value, bool $required = false, ?int $scale = null, ?bool $groupThousands = null, ?bool $trimTrailingZeros = null, ?string $rounding = null): ?string {
 
 		$useScale = ($scale === null) ? $this->decimalScale : $scale;
 		if ($useScale < 0 || $useScale > 18) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_scale_range','value_from_sql','citomni/infrastructure','Invalid decimal scale (%SCALE%).',['scale' => $useScale]));
+			throw new ValueDefinitionException('Invalid decimal scale: $scale must be in range 0..18.');
 		}
 
 		$useGrouping = ($groupThousands === null) ? $this->groupThousands : $groupThousands;
@@ -282,18 +285,18 @@ final class ValueFromSql extends BaseService {
 
 		$useRounding = ($rounding === null) ? $this->decimalStringRounding : $rounding;
 		if ($useRounding !== self::ROUND_FAIL && $useRounding !== self::ROUND_TRUNCATE && $useRounding !== self::ROUND_HALF_UP) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_string_rounding_invalid','value_from_sql','citomni/infrastructure','Invalid rounding mode.'));
+			throw new ValueDefinitionException('Invalid decimal rounding mode override.');
 		}
 
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Decimal value is required.', 'err_value_from_sql_decimal_required');
 			}
 			return null;
 		}
 
 		if (\is_bool($value) || \is_array($value) || \is_object($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_invalid_type','value_from_sql','citomni/infrastructure','Invalid decimal type.'));
+			throw new ValueFromSqlException('Invalid decimal type.', 'err_value_from_sql_decimal_invalid_type');
 		}
 
 		// Normalize to a dot-decimal string first.
@@ -302,10 +305,11 @@ final class ValueFromSql extends BaseService {
 			$s = (string)$value;
 		} elseif (\is_float($value)) {
 			if (!\is_finite($value)) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_invalid','value_from_sql','citomni/infrastructure','Invalid decimal.'));
+				throw new ValueFromSqlException('Invalid decimal value.', 'err_value_from_sql_decimal_invalid');
 			}
 			$rounded = \round($value, $useScale, \PHP_ROUND_HALF_UP);
 			$s = \number_format($rounded, $useScale, '.', '');
+
 			if ($useScale > 0) {
 				if ($s[0] === '-' && \strncmp($s, '-0.', 3) === 0 && \trim(\substr($s, 3), '0') === '') {
 					$s = \substr($s, 1);
@@ -319,7 +323,7 @@ final class ValueFromSql extends BaseService {
 			$s = \trim((string)$value);
 			if ($s === '') {
 				if ($required) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_required','value_from_sql','citomni/infrastructure','Value is required.'));
+					throw new ValueFromSqlException('Decimal value is required.', 'err_value_from_sql_decimal_required');
 				}
 				return null;
 			}
@@ -361,12 +365,14 @@ final class ValueFromSql extends BaseService {
 	 * @param mixed $value SQL value.
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return bool|null Bool or null.
+	 *
+	 * @throws ValueFromSqlException On invalid type/value or when required=true and empty.
 	 */
 	public function boolean(mixed $value, bool $required = false): ?bool {
 
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_boolean_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Boolean value is required.', 'err_value_from_sql_boolean_required');
 			}
 			return null;
 		}
@@ -376,25 +382,33 @@ final class ValueFromSql extends BaseService {
 		}
 
 		if (\is_int($value)) {
-			if ($value === 0) { return false; }
-			if ($value === 1) { return true; }
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_boolean_invalid','value_from_sql','citomni/infrastructure','Invalid boolean value.'));
+			if ($value === 0) {
+				return false;
+			}
+			if ($value === 1) {
+				return true;
+			}
+			throw new ValueFromSqlException('Invalid boolean value.', 'err_value_from_sql_boolean_invalid');
 		}
 
 		if (\is_string($value)) {
 			$s = \trim($value);
 			if ($s === '') {
 				if ($required) {
-					throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_boolean_required','value_from_sql','citomni/infrastructure','Value is required.'));
+					throw new ValueFromSqlException('Boolean value is required.', 'err_value_from_sql_boolean_required');
 				}
 				return null;
 			}
-			if ($s === '0') { return false; }
-			if ($s === '1') { return true; }
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_boolean_invalid','value_from_sql','citomni/infrastructure','Invalid boolean value.'));
+			if ($s === '0') {
+				return false;
+			}
+			if ($s === '1') {
+				return true;
+			}
+			throw new ValueFromSqlException('Invalid boolean value.', 'err_value_from_sql_boolean_invalid');
 		}
 
-		throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_boolean_invalid_type','value_from_sql','citomni/infrastructure','Invalid boolean type.'));
+		throw new ValueFromSqlException('Invalid boolean type.', 'err_value_from_sql_boolean_invalid_type');
 	}
 
 
@@ -420,21 +434,22 @@ final class ValueFromSql extends BaseService {
 	 * @param string $format Output format token (Default 'YYYY-MM-DD').
 	 * @return string|null Formatted date string or null.
 	 *
-	 * @throws \InvalidArgumentException On non-string input, invalid SQL date, unsupported format,
-	 *                                   or when required=true and value is null/empty.
+	 * @throws ValueFromSqlException On non-string input, invalid SQL date,
+	 *                               or when required=true and value is null/empty.
+	 * @throws ValueDefinitionException On unsupported output format.
 	 */
 	public function date(mixed $value, bool $required = false, string $format = 'YYYY-MM-DD'): ?string {
 
 		// Fail fast on unsupported format before any parsing work.
 		if ($format !== 'YYYY-MM-DD' && $format !== 'DD-MM-YYYY' && $format !== 'DD/MM/YYYY' && $format !== 'MM/DD/YYYY') {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_date_unsupported_format','value_from_sql','citomni/infrastructure','Unsupported date format.'));
+			throw new ValueDefinitionException('Unsupported date output format.');
 		}
 
-		$s = $this->requireTrimmedStringOrNull($value);
+		$s = $this->requireTrimmedStringOrNull($value, 'err_value_from_sql_date_invalid_type');
 
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_date_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Date value is required.', 'err_value_from_sql_date_required');
 			}
 			return null;
 		}
@@ -469,16 +484,16 @@ final class ValueFromSql extends BaseService {
 	 * @param bool|null $includeSeconds Override cfg precision (Default null = use cfg).
 	 * @return string|null HTML time string or null.
 	 *
-	 * @throws \InvalidArgumentException On non-string input, invalid SQL time,
-	 *                                   or when required=true and value is null/empty.
+	 * @throws ValueFromSqlException On non-string input, invalid SQL time,
+	 *                               or when required=true and value is null/empty.
 	 */
 	public function time(mixed $value, bool $required = false, ?bool $includeSeconds = null): ?string {
 
-		$s = $this->requireTrimmedStringOrNull($value);
+		$s = $this->requireTrimmedStringOrNull($value, 'err_value_from_sql_time_invalid_type');
 
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_time_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Time value is required.', 'err_value_from_sql_time_required');
 			}
 			return null;
 		}
@@ -514,23 +529,23 @@ final class ValueFromSql extends BaseService {
 	 * @param bool|null $includeSeconds Override cfg precision (Default null = use cfg).
 	 * @return string|null HTML datetime-local string or null.
 	 *
-	 * @throws \InvalidArgumentException On non-string input, invalid SQL datetime,
-	 *                                   or when required=true and value is null/empty.
+	 * @throws ValueFromSqlException On non-string input, invalid SQL datetime,
+	 *                               or when required=true and value is null/empty.
 	 */
 	public function dateTimeLocal(mixed $value, bool $required = false, ?bool $includeSeconds = null): ?string {
 
-		$s = $this->requireTrimmedStringOrNull($value);
+		$s = $this->requireTrimmedStringOrNull($value, 'err_value_from_sql_datetime_invalid_type');
 
 		if ($s === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_datetime_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Datetime value is required.', 'err_value_from_sql_datetime_required');
 			}
 			return null;
 		}
 
 		// Minimum length: "YYYY-MM-DD HH:MM" = 16 chars. Space must be at position 10.
 		if (\strlen($s) < 16 || $s[10] !== ' ') {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_datetime_invalid_format','value_from_sql','citomni/infrastructure','Invalid SQL datetime format.'));
+			throw new ValueFromSqlException('Invalid SQL datetime format.', 'err_value_from_sql_datetime_invalid_format');
 		}
 
 		[$y, $m, $d] = $this->parseSqlDate(\substr($s, 0, 10));
@@ -573,24 +588,24 @@ final class ValueFromSql extends BaseService {
 	 * @param bool $required Whether null/empty string is allowed (Default false).
 	 * @return string|null Raw string or null.
 	 *
-	 * @throws \InvalidArgumentException On non-string input, or when required=true and value is null/empty string.
+	 * @throws ValueFromSqlException On non-string input, or when required=true and value is null/empty string.
 	 */
 	public function text(mixed $value, bool $required = false): ?string {
 
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_text_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Text value is required.', 'err_value_from_sql_text_required');
 			}
 			return null;
 		}
 
 		if (!\is_string($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_text_invalid_type','value_from_sql','citomni/infrastructure','Invalid text type.'));
+			throw new ValueFromSqlException('Invalid text type.', 'err_value_from_sql_text_invalid_type');
 		}
 
 		if ($value === '') {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_text_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('Text value is required.', 'err_value_from_sql_text_required');
 			}
 			return null;
 		}
@@ -605,24 +620,26 @@ final class ValueFromSql extends BaseService {
 	 * @param mixed $value SQL value (string|null).
 	 * @param bool $required Whether empty input is allowed (Default false).
 	 * @return array|null Decoded array or null.
+	 *
+	 * @throws ValueFromSqlException On invalid JSON, invalid type, or when required=true and empty.
 	 */
 	public function json(mixed $value, bool $required = false): ?array {
 
 		if ($value === null) {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_json_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('JSON value is required.', 'err_value_from_sql_json_required');
 			}
 			return null;
 		}
 
 		if (!\is_string($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_json_invalid_type','value_from_sql','citomni/infrastructure','Invalid JSON type.'));
+			throw new ValueFromSqlException('Invalid JSON type.', 'err_value_from_sql_json_invalid_type');
 		}
 
 		$s = \trim($value);
 		if ($s === '') {
 			if ($required) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_json_required','value_from_sql','citomni/infrastructure','Value is required.'));
+				throw new ValueFromSqlException('JSON value is required.', 'err_value_from_sql_json_required');
 			}
 			return null;
 		}
@@ -630,11 +647,11 @@ final class ValueFromSql extends BaseService {
 		try {
 			$decoded = \json_decode($s, true, 512, \JSON_THROW_ON_ERROR);
 		} catch (\JsonException) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_json_invalid','value_from_sql','citomni/infrastructure','Invalid JSON.'));
+			throw new ValueFromSqlException('Invalid JSON.', 'err_value_from_sql_json_invalid');
 		}
 
 		if (!\is_array($decoded)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_json_invalid','value_from_sql','citomni/infrastructure','Invalid JSON.'));
+			throw new ValueFromSqlException('Invalid JSON.', 'err_value_from_sql_json_invalid');
 		}
 
 		return $decoded;
@@ -645,9 +662,12 @@ final class ValueFromSql extends BaseService {
 	 * Require a trimmed string or null.
 	 *
 	 * @param mixed $value SQL value.
+	 * @param string $invalidKey Message key used when the value type is invalid.
 	 * @return string|null Trimmed string or null.
+	 *
+	 * @throws ValueFromSqlException When $value is not a supported string/int source.
 	 */
-	private function requireTrimmedStringOrNull(mixed $value): ?string {
+	private function requireTrimmedStringOrNull(mixed $value, string $invalidKey): ?string {
 
 		if ($value === null) {
 			return null;
@@ -660,25 +680,27 @@ final class ValueFromSql extends BaseService {
 		}
 
 		if (!\is_string($value)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_invalid_type','value_from_sql','citomni/infrastructure','Value must be a string.'));
+			throw new ValueFromSqlException('Invalid input type.', $invalidKey);
 		}
 
 		$s = \trim($value);
 		return ($s === '') ? null : $s;
 	}
-	
-	
+
+
 	/**
 	 * Parse and validate SQL DATE "YYYY-MM-DD".
 	 *
 	 * @param string $s Trimmed date string.
 	 * @return array{int,int,int} [y, m, d]
+	 *
+	 * @throws ValueFromSqlException On invalid SQL date format or invalid calendar date.
 	 */
 	private function parseSqlDate(string $s): array {
 
 		$matches = [];
 		if (\preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $s, $matches) !== 1) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_date_invalid_format','value_from_sql','citomni/infrastructure','Invalid SQL date format.'));
+			throw new ValueFromSqlException('Invalid SQL date format.', 'err_value_from_sql_date_invalid_format');
 		}
 
 		$y = (int)$matches[1];
@@ -686,7 +708,7 @@ final class ValueFromSql extends BaseService {
 		$d = (int)$matches[3];
 
 		if (!\checkdate($m, $d, $y)) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_date_invalid','value_from_sql','citomni/infrastructure','Invalid date.'));
+			throw new ValueFromSqlException('Invalid date.', 'err_value_from_sql_date_invalid');
 		}
 
 		return [$y, $m, $d];
@@ -710,6 +732,8 @@ final class ValueFromSql extends BaseService {
 	 *
 	 * @param string $s Trimmed non-empty string.
 	 * @return array{sign:string,int:string,frac:string} Parsed parts.
+	 *
+	 * @throws ValueFromSqlException On invalid SQL decimal format.
 	 */
 	private function parseSqlDotDecimal(string $s): array {
 
@@ -721,13 +745,13 @@ final class ValueFromSql extends BaseService {
 			}
 			$s = \substr($s, 1);
 			if ($s === '') {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_invalid','value_from_sql','citomni/infrastructure','Invalid decimal.'));
+				throw new ValueFromSqlException('Invalid decimal value.', 'err_value_from_sql_decimal_invalid');
 			}
 		}
 
 		// Accept: "123", "123.45", ".45" (leading dot normalized below). Reject: scientific, locale separators, thousand separators.
 		if (\preg_match('/^(?:\d+(?:\.\d+)?|\.\d+)$/', $s) !== 1) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_invalid','value_from_sql','citomni/infrastructure','Invalid decimal.'));
+			throw new ValueFromSqlException('Invalid decimal value.', 'err_value_from_sql_decimal_invalid');
 		}
 
 		if ($s[0] === '.') {
@@ -772,6 +796,8 @@ final class ValueFromSql extends BaseService {
 	 * @param int $scale 0..18.
 	 * @param string $rounding One of: "fail", "truncate", "half_up".
 	 * @return array{string,string,string} [$intDigits, $fracDigits, $sign]
+	 *
+	 * @throws ValueFromSqlException On rounding-policy violations for SQL data.
 	 */
 	private function applyScalePolicy(string $sign, string $intDigits, string $fracDigits, int $scale, string $rounding): array {
 
@@ -782,7 +808,7 @@ final class ValueFromSql extends BaseService {
 			}
 
 			if ($rounding === self::ROUND_FAIL) {
-				throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_too_many_decimals','value_from_sql','citomni/infrastructure','Too many decimals (scale is 0).'));
+				throw new ValueFromSqlException('Too many decimals.', 'err_value_from_sql_decimal_too_many_decimals', ['scale' => $scale]);
 			}
 
 			if ($rounding === self::ROUND_TRUNCATE) {
@@ -821,7 +847,7 @@ final class ValueFromSql extends BaseService {
 
 		// fracLen > scale: Too many digits.
 		if ($rounding === self::ROUND_FAIL) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_decimal_too_many_decimals','value_from_sql','citomni/infrastructure','Too many decimals (max %SCALE%).',['scale' => $scale]));
+			throw new ValueFromSqlException('Too many decimals.', 'err_value_from_sql_decimal_too_many_decimals', ['scale' => $scale]);
 		}
 
 		if ($rounding === self::ROUND_TRUNCATE) {
@@ -941,12 +967,14 @@ final class ValueFromSql extends BaseService {
 	 *
 	 * @param string $s Trimmed time string.
 	 * @return array{int,int,int} [hh, mm, ss]
+	 *
+	 * @throws ValueFromSqlException On invalid SQL time format or invalid time value.
 	 */
 	private function parseSqlWallClockTime(string $s): array {
 
 		$matches = [];
 		if (\preg_match('/^(\d{2}):(\d{2})(?::(\d{2}))?$/', $s, $matches) !== 1) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_time_invalid_format','value_from_sql','citomni/infrastructure','Invalid SQL time format.'));
+			throw new ValueFromSqlException('Invalid SQL time format.', 'err_value_from_sql_time_invalid_format');
 		}
 
 		$hh = (int)$matches[1];
@@ -955,7 +983,7 @@ final class ValueFromSql extends BaseService {
 		$ss = ($ssRaw !== '') ? (int)$ssRaw : 0;
 
 		if ($hh < 0 || $hh > 23 || $mm < 0 || $mm > 59 || $ss < 0 || $ss > 59) {
-			throw new \InvalidArgumentException($this->app->txt->get('err_value_from_sql_time_invalid','value_from_sql','citomni/infrastructure','Invalid time.'));
+			throw new ValueFromSqlException('Invalid time.', 'err_value_from_sql_time_invalid');
 		}
 
 		return [$hh, $mm, $ss];
@@ -968,10 +996,10 @@ final class ValueFromSql extends BaseService {
 	 * Applies thousand grouping to the integer part and joins with the cfg
 	 * decimal separator. Emits no decimal separator when $fracDigits is empty.
 	 *
-	 * @param string $sign        '' or '-'.
-	 * @param string $intDigits   Digit-only integer part (no leading zeros unless "0").
-	 * @param string $fracDigits  Digit-only fractional part (may be '' when scale=0 or trimmed).
-	 * @param bool   $groupThousands Whether to apply cfg thousand grouping.
+	 * @param string $sign '' or '-'.
+	 * @param string $intDigits Digit-only integer part (no leading zeros unless "0").
+	 * @param string $fracDigits Digit-only fractional part (may be '' when scale=0 or trimmed).
+	 * @param bool $groupThousands Whether to apply cfg thousand grouping.
 	 * @return string Locale-formatted decimal string.
 	 */
 	private function assembleDecimalParts(string $sign, string $intDigits, string $fracDigits, bool $groupThousands): string {
