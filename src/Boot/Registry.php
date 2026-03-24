@@ -147,7 +147,7 @@ final class Registry {
 				'max_lines' 	   => 200, // Cap number of transcript lines persisted (avoid runaway logs).				
 				'include_bodies'   => false, // Include full mail bodies in error logs? (never in prod!) true = log entire Body/AltBody on error, false = only log length + sha256.
 			],			
-		],
+		],		
 		
 		
 		/*
@@ -155,15 +155,19 @@ final class Registry {
 		 * SECURITY
 		 *------------------------------------------------------------------
 		 */
-		
 		'security' => [
-			'csrf_protection'		=> true, // true | false; Prevent CSRF (Cross-Site Request Forgery) attacks.
-			'csrf_field_name'		=> 'csrf_token',
-			
-			// Anti-bots
-			'captcha_protection'	=> true, // true | false; The native captcha will help prevent bots from filling out forms.
-			'honeypot_protection'	=> true, // true | false; Enables honeypot protection to prevent automated bot submissions.	
-			'form_action_switching'	=> true, // true | false; Enables dynamic form action switching to prevent bot submissions.
+
+			// Brute force protection
+			'bruteforce' => [
+				'default' => [
+					'max_identifier_attempts' => 5,
+					'max_ip_attempts'         => 25,
+					'interval_minutes'        => 15,
+					'retry_after_seconds'     => 900,
+					'prune_after_seconds'     => 604800, // optional, default: 7 days
+				],
+			],
+
 		],
 
 
@@ -207,27 +211,6 @@ final class Registry {
 			],
 		],
 
-
-
-		/*
-		 *------------------------------------------------------------------
-		 * SECURITY
-		 *------------------------------------------------------------------
-		 */
-		'security' => [
-
-			// Brute force protection
-			'bruteforce' => [
-				'default' => [
-					'max_identifier_attempts' => 5,
-					'max_ip_attempts'         => 25,
-					'interval_minutes'        => 15,
-					'retry_after_seconds'     => 900,
-					'prune_after_seconds'     => 604800, // optional, default: 7 days
-				],
-			],
-
-		],
 
 	];
 	

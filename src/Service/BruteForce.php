@@ -649,6 +649,11 @@ final class BruteForce extends BaseService {
 
 			if ($ip !== '') {
 				$ipVal = \strtolower($ip);
+
+				// Treat transport sentinel values as "no IP dimension".
+				if ($ipVal === 'unknown' || $ipVal === 'cli') {
+					$ipVal = null;
+				}
 			}
 		}
 
