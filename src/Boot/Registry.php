@@ -27,13 +27,15 @@ namespace CitOmni\Infrastructure\Boot;
 final class Registry {
 	
 	public const MAP_HTTP = [
-		'db'   => \CitOmni\Infrastructure\Service\Db::class,
-		'log'  => \CitOmni\Infrastructure\Service\Log::class,
-		'txt'  => \CitOmni\Infrastructure\Service\Txt::class,
-		'mailer' => \CitOmni\Infrastructure\Service\Mailer::class,
-		'valueToSql' => \CitOmni\Infrastructure\Service\ValueToSql::class,
-		'valueFromSql' => \CitOmni\Infrastructure\Service\ValueFromSql::class,
-		'bruteForce' => \CitOmni\Infrastructure\Service\BruteForce::class,
+
+		'log'			=> \CitOmni\Infrastructure\Service\Log::class,
+		'txt'			=> \CitOmni\Infrastructure\Service\Txt::class,
+		'mailer'		=> \CitOmni\Infrastructure\Service\Mailer::class,
+		'curl'			=> \CitOmni\Infrastructure\Service\Curl::class,
+		'db'			=> \CitOmni\Infrastructure\Service\Db::class,
+		'valueToSql'	=> \CitOmni\Infrastructure\Service\ValueToSql::class,
+		'valueFromSql'	=> \CitOmni\Infrastructure\Service\ValueFromSql::class,
+		'bruteForce'	=> \CitOmni\Infrastructure\Service\BruteForce::class,
 		
 		// FormatNumber has been deprecated and will be removed soon...
 		'formatNumber' => \CitOmni\Infrastructure\Service\FormatNumber::class,
@@ -52,8 +54,7 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 * DATABASE CREDENTIALS
 		 *------------------------------------------------------------------
-		 */
-		
+		 */		
 		'db' => [
 			'host'		=> 'localhost',
 			'user'		=> 'citomni',
@@ -67,8 +68,7 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 * LOG
 		 *------------------------------------------------------------------
-		 */
-		
+		 */		
 		'log' => [
 			'path'         => \CITOMNI_APP_PATH . '/var/logs',
 			'default_file' => 'citomni_app.log',
@@ -81,13 +81,36 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 * STATIC TEXT
 		 *------------------------------------------------------------------
-		 */
-		 
+		 */		 
 		'txt' => [
 			'log' => [
 				'file' => 'litetxt_errors.jsonl',
 				'path' => \CITOMNI_APP_PATH . '/var/logs',
 			],
+		],
+
+
+		/*
+		 *------------------------------------------------------------------
+		 * cURL
+		 *------------------------------------------------------------------
+		 */
+		'curl' => [
+			'timeout'           => 30,
+			'connect_timeout'   => 10,
+			'follow_redirects'  => false,
+			'max_redirects'     => 0,
+			'user_agent'        => 'CitOmni cURL',
+			'verify_peer'       => true,
+			'verify_host'       => 2,
+			'ca_info'           => null,
+			'proxy'             => null,
+			'return_headers'    => true,
+			'capture_info'      => true,
+			'auto_referer'      => true,
+			'log_errors'        => true,
+			'log_success'       => false,
+			'log_file'          => 'curl.jsonl',
 		],
 
 
