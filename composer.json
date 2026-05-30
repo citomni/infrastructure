@@ -10,8 +10,7 @@
 	"require": {
 		"php": "^8.2",
 		"citomni/kernel": "*",
-		"phpmailer/phpmailer": "^6.9",
-		"larsgmortensen/litemysqli": "^1.0"
+		"phpmailer/phpmailer": "^6.9"
 	},
 	"autoload": {
 		"psr-4": {
