@@ -80,6 +80,7 @@ final class Curl extends BaseService {
 	protected function init(): void {
 
 		$cfg = $this->app->cfg->curl;
+		$cfgLogFile = $cfg->log_file ?? null;
 
 		$this->defaults = [
 			'method'            => 'GET',
@@ -105,13 +106,13 @@ final class Curl extends BaseService {
 			'basic_auth'        => null,
 			'bearer_token'      => null,
 			'curl_options'      => [],
-			'log_file'          => $cfgLogFile !== null ? (string)$cfgLogFile : null,
+			'log_file'          => null,
 			'log_context'       => [],
 		];
 
 		$this->logErrors      = (bool)($cfg->log_errors ?? true);
 		$this->logSuccess     = (bool)($cfg->log_success ?? false);
-		$this->defaultLogFile = $cfg->log_file ?? null;
+		$this->defaultLogFile = $cfgLogFile !== null ? (string)$cfgLogFile : null;
 
 		if (isset($this->options['defaults']) && \is_array($this->options['defaults'])) {
 			foreach ($this->options['defaults'] as $key => $value) {
