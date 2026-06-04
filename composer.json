@@ -1,15 +1,33 @@
 {
 	"name": "citomni/infrastructure",
-	"description": "Lean, cross-mode infrastructure for CitOmni apps: DB (LiteMySQLi), logging (LiteLog), text/i18n (LiteTxt), mail (PHPMailer), and optional contact routes.",
+	"description": "Lean, cross-mode infrastructure for CitOmni apps: DB, logging, text/i18n, mail, cURL, brute-force protection, and optional contact routes.",
 	"type": "library",
 	"license": "MIT",
 	"homepage": "https://github.com/citomni/infrastructure",
 	"keywords": [
-		"infrastructure", "cli", "php", "http", "captcha", "high-performance", "psr-4", "low-overhead", "deterministic", "php8", "citomni",  "citomni-framework",  "citomni-php", "green-by-design", "deterministic-config", "litemysqli", "phpmailer", "litelog", "litetxt", "i18n", "csrf", "framework"
+		"citomni",
+		"infrastructure",
+		"php",
+		"php8",
+		"framework",
+		"low-overhead",
+		"deterministic",
+		"database",
+		"mysqli",
+		"logging",
+		"i18n",
+		"mailer",
+		"phpmailer",
+		"curl",
+		"bruteforce",
+		"contact-form",
+		"formatting"
 	],
 	"require": {
 		"php": "^8.2",
-		"citomni/kernel": "*",
+		"ext-curl": "*",
+		"ext-mysqli": "*",
+		"citomni/kernel": "^1.0",
 		"phpmailer/phpmailer": "^6.9"
 	},
 	"autoload": {
@@ -31,8 +49,9 @@
 		"ext-iconv": "Improves UTF-8 normalization in Mailer (fallbacks exist).",
 		"ext-mbstring": "Alternative for UTF-8 normalization in Mailer (fallbacks exist).",
 		"ext-opcache": "Better performance in production.",
-		"citomni/http": "HTTP runtime (Router, Request, View, Security) if you use the provided routes.",
-		"citomni/auth": "^1.0"
+		"citomni/http": "HTTP runtime for provided routes, controllers, request handling, views, and security integration.",
+		"citomni/cli": "CLI runtime for infrastructure-related commands, maintenance tasks, jobs, and developer tooling.",
+		"citomni/authenticate": "User accounts, login, registration, password lifecycle, MFA, trusted devices, and member profile flows."
 	},
 	"support": {
 		"issues": "https://github.com/citomni/infrastructure/issues",
@@ -52,11 +71,13 @@
 	"archive": {
 		"exclude": [
 			"/.github",
+			"/_internal",
 			"/docs",
 			"/tests",
 			"/dev",
 			"/examples",
 			"/vendor",
+			"*.bck",
 			"/.editorconfig",
 			"/.gitattributes",
 			"/.gitignore",
@@ -65,5 +86,10 @@
 			"/.vscode",
 			"/Makefile"
 		]
+	},
+	"extra": {
+		"branch-alias": {
+			"dev-main": "1.0.x-dev"
+		}
 	}
 }
