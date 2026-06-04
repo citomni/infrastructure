@@ -32,3 +32,24 @@ Any other domain usage is not official unless explicitly approved in writing.
 
 For questions about CitOmni trademarks, contact: legal@citomni.com
 For questions about this software's license, contact: Lars Grove Mortensen
+
+------------------------------------------------------------
+Bundled third-party fonts
+------------------------------------------------------------
+This package includes third-party font files used for CAPTCHA rendering.
+
+Bundled files:
+ - assets/fonts/Roboto-Regular.ttf
+ - assets/fonts/RobotoSlab-Regular.ttf
+
+Roboto and Roboto Slab are font projects by Google and are redistributed
+under the Apache License, Version 2.0.
+
+The Apache License, Version 2.0 text is included in:
+ - assets/fonts/LICENSE-APACHE-2.0.txt
+
+CitOmni itself remains licensed under the MIT License.
+The bundled font files remain licensed by their respective copyright holders.
+
+The bundled fonts are used as runtime assets only. Their inclusion does not
+change the license of CitOmni source code.
