@@ -44,7 +44,7 @@ use CitOmni\Kernel\Repository\BaseRepository;
 final class BruteForceRepository extends BaseRepository {
 	
 	/** @var string Table name for brute force counter rows. */
-	private const TABLE = 'bruteforce_counters';
+	public const TABLE = 'bruteforce_counters';
 
 
 	/**

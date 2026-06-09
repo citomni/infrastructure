@@ -16,7 +16,9 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Service;
 
 use CitOmni\Infrastructure\Exception\BruteForceConfigException;
+use CitOmni\Infrastructure\Exception\BruteForceSetupException;
 use CitOmni\Infrastructure\Repository\BruteForceRepository;
+use CitOmni\Infrastructure\Repository\DatabaseSchemaRepository;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
@@ -118,6 +120,31 @@ final class BruteForce extends BaseService {
 		}
 
 		$this->repo = new BruteForceRepository($this->app);
+	}
+	
+	
+	/**
+	 * Assert that the brute force persistence table is installed.
+	 *
+	 * Behavior:
+	 * - Performs a cheap metadata lookup against the active database.
+	 * - Throws a brute-force-specific setup exception when storage is missing.
+	 * - Does not validate context config; normal config validation still happens
+	 *   through init() and resolveContext().
+	 *
+	 * @return void
+	 * @throws BruteForceSetupException When the required table is missing.
+	 */
+	public function assertStorageReady(): void {
+		$schemaRepo = new DatabaseSchemaRepository($this->app);
+
+		if (!$schemaRepo->tableExists(BruteForceRepository::TABLE)) {
+			throw new BruteForceSetupException(
+				'Required database table is missing: ' . BruteForceRepository::TABLE . '.',
+				BruteForceRepository::TABLE,
+				'Run citomni_bruteforce.sql on this environment before using brute force protection.'
+			);
+		}
 	}
 
 
