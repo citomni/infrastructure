@@ -1,0 +1,33 @@
+# Normalize line endings across the repo.
+* text=auto eol=lf
+
+# Repository-only metadata.
+/.github                export-ignore
+/.gitignore             export-ignore
+/.gitattributes         export-ignore
+
+# Internal/private working folders.
+/_backups/**            export-ignore
+**/_backups/**          export-ignore
+/_internal              export-ignore
+
+# Tests and local QA artifacts.
+/tests                  export-ignore
+/phpunit.xml*           export-ignore
+/.phpunit.result.cache  export-ignore
+/phpstan*.neon*         export-ignore
+/psalm*.xml*            export-ignore
+/.php-cs-fixer.php      export-ignore
+/.php-cs-fixer.dist.php export-ignore
+
+# Editor/IDE files.
+/.editorconfig          export-ignore
+/.idea                  export-ignore
+/.vscode                export-ignore
+
+# Composer lock is normally not shipped with libraries.
+composer.lock           export-ignore
+
+# Optional development-only folders.
+/scripts                export-ignore
+/stubs                  export-ignore
