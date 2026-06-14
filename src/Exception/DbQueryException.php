@@ -38,5 +38,22 @@ namespace CitOmni\Infrastructure\Exception;
  *   }
  */
 final class DbQueryException extends DbException {
+	private const MYSQL_DUPLICATE_ENTRY_CODE = 1062;
 
+	/**
+	 * Check whether this query failure is a duplicate-entry violation.
+	 *
+	 * Behavior:
+	 * - Returns true for MySQL/MariaDB duplicate-key errors.
+	 * - Uses the exception code passed by the Db service from mysqli.
+	 *
+	 * Notes:
+	 * - This helper is additive and does not change existing exception behavior.
+	 * - Keep this narrow; callers should still verify the relevant domain state.
+	 *
+	 * @return bool True when the query failed because a unique key already exists.
+	 */
+	public function isDuplicateEntry(): bool {
+		return $this->getCode() === self::MYSQL_DUPLICATE_ENTRY_CODE;
+	}
 }
