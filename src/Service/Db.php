@@ -30,6 +30,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT) is set in init(). This is a
  *   global driver flag; it affects all mysqli operations in the process for the request lifetime.
  * - Connection is lazy; opened on first getConnection() call.
+ * - Manual connection recovery is available via checkConnection(), ensureConnection(), and reconnect().
  * - Statement cache is bounded (FIFO eviction). Set limit to 0 to disable.
  * - All queries use positional ? placeholders. Types are auto-detected.
  * - Errors surface as DbConnectException (connection/session) or DbQueryException (queries).
@@ -68,6 +69,10 @@ final class Db extends BaseService {
 	private const BATCH_CHUNK_SIZE        = 1000;
 
 	// Connection settings resolved once in init(). Never read from cfg again after that.
+	// $cfgPass is retained for in-place reconnect(). var_dump() output is redacted via
+	// __debugInfo(), but print_r(), var_export(), serialize() and exception stack
+	// traces are NOT covered. Avoid dumping, serializing or tracing this instance
+	// where credentials must not leak.
 	private string  $cfgHost    = '';
 	private string  $cfgUser    = '';
 	private string  $cfgPass    = '';
@@ -82,7 +87,15 @@ final class Db extends BaseService {
 	/** @var ?\mysqli Active connection; null until first use or after close(). */
 	private ?\mysqli $connection = null;
 
-	/** @var bool True while a transaction is active on this connection. */
+	/**
+	 * Best-effort transaction state for Db-managed transactions.
+	 *
+	 * This tracks beginTransaction(), transaction() and easyTransaction() usage.
+	 * Raw START TRANSACTION calls and implicit commits from DDL/administrative SQL
+	 * can desynchronize this flag because MySQL does not expose that state here.
+	 *
+	 * @var bool
+	 */
 	private bool $inTransaction = false;
 
 	/** @var array<string, \mysqli_stmt> Statement cache, keyed by trimmed SQL string. */
@@ -922,6 +935,10 @@ final class Db extends BaseService {
 	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
 	 */
 	public function beginTransaction(): void {
+		if ($this->inTransaction) {
+			throw new DbQueryException('Transaction already active. Nested transactions are not supported.');
+		}
+
 		try {
 			$this->getConnection()->begin_transaction();
 			$this->inTransaction = true;
@@ -944,9 +961,10 @@ final class Db extends BaseService {
 	public function commit(): void {
 		try {
 			$this->requireConnection()->commit();
-			$this->inTransaction = false;
 		} catch (\mysqli_sql_exception $e) {
 			throw new DbQueryException($e->getMessage(), (int)$e->getCode(), $e);
+		} finally {
+			$this->inTransaction = false;
 		}
 	}
 
@@ -964,9 +982,10 @@ final class Db extends BaseService {
 	public function rollback(): void {
 		try {
 			$this->requireConnection()->rollback();
-			$this->inTransaction = false;
 		} catch (\mysqli_sql_exception $e) {
 			throw new DbQueryException($e->getMessage(), (int)$e->getCode(), $e);
+		} finally {
+			$this->inTransaction = false;
 		}
 	}
 
@@ -1034,6 +1053,92 @@ final class Db extends BaseService {
 
 
 	// -------------------------------------------------------------------------
+	// Connection recovery
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Check whether the active MySQL connection is currently usable.
+	 *
+	 * Behavior:
+	 * - Returns false when no connection has been opened yet.
+	 * - Issues a trivial SELECT 1 round-trip when a connection exists.
+	 * - Does not increment the query counter; this is a liveness probe, not workload.
+	 * - Catches both mysqli_sql_exception and lower-level errors from stale/closed handles.
+	 *
+	 * @return bool True when an active connection responds, false otherwise.
+	 */
+	public function checkConnection(): bool {
+		if (!$this->connection instanceof \mysqli) {
+			return false;
+		}
+
+		try {
+			$result = $this->connection->query('SELECT 1');
+
+			// Non-STRICT mysqli_report mode returns false instead of throwing.
+			if ($result === false) {
+				return false;
+			}
+
+			if ($result instanceof \mysqli_result) {
+				$result->free();
+			}
+
+			return true;
+		} catch (\Throwable) {
+			return false;
+		}
+	}
+
+
+	/**
+	 * Ensure a usable MySQL connection exists.
+	 *
+	 * Intended for long-running CLI processes before resuming database work after
+	 * idle time, external IO, or human-in-the-loop pauses. Opens a lazy connection
+	 * when none exists, or reconnects when the existing connection is no longer
+	 * usable.
+	 *
+	 * @return void
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On reconnect failure.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException If called inside a tracked transaction.
+	 */
+	public function ensureConnection(): void {
+		if ($this->checkConnection()) {
+			return;
+		}
+
+		$this->reconnect();
+	}
+
+
+	/**
+	 * Rebuild the MySQL connection in place.
+	 *
+	 * Drops cached statements, closes the current handle best-effort, then opens a
+	 * freshly initialized connection using the stored configuration. Refuses to
+	 * reconnect during a tracked transaction because transaction state would be
+	 * lost on the old connection.
+	 *
+	 * @return void
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On reconnect failure.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException If called inside a tracked transaction.
+	 */
+	public function reconnect(): void {
+		if ($this->inTransaction) {
+			throw new DbQueryException(
+				'Refusing to reconnect inside an active transaction; transaction state would be lost.'
+			);
+		}
+
+		$this->close();
+		$this->getConnection();
+	}
+
+
+
+
+	// -------------------------------------------------------------------------
 	// Meta
 	// -------------------------------------------------------------------------
 
@@ -1075,6 +1180,36 @@ final class Db extends BaseService {
 			$this->queryCount = 0;
 		}
 		return $count;
+	}
+
+
+	/**
+	 * Return safe debug information for var_dump().
+	 *
+	 * Password output is deliberately redacted because connection credentials are
+	 * retained for reconnect(). This affects var_dump() only; print_r(),
+	 * var_export(), serialize() and exception stack traces are not covered.
+	 *
+	 * @return array<string,mixed> Safe diagnostic state.
+	 */
+	public function __debugInfo(): array {
+		return [
+			'cfgHost' => $this->cfgHost,
+			'cfgUser' => $this->cfgUser,
+			'cfgPass' => '[redacted]',
+			'cfgName' => $this->cfgName,
+			'cfgCharset' => $this->cfgCharset,
+			'cfgPort' => $this->cfgPort,
+			'cfgSocket' => $this->cfgSocket,
+			'cfgConnectTimeout' => $this->cfgConnectTimeout,
+			'cfgSqlMode' => $this->cfgSqlMode,
+			'cfgTimezone' => $this->cfgTimezone,
+			'hasConnection' => $this->connection instanceof \mysqli,
+			'inTransaction' => $this->inTransaction,
+			'statementCacheLimit' => $this->statementCacheLimit,
+			'statementCacheCount' => \count($this->statementCache),
+			'queryCount' => $this->queryCount,
+		];
 	}
 
 
