@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Service;
 
+use CitOmni\Infrastructure\Enum\TransactionIsolation;
 use CitOmni\Infrastructure\Exception\DbConnectException;
 use CitOmni\Infrastructure\Exception\DbQueryException;
 use CitOmni\Kernel\Service\BaseService;
@@ -925,22 +926,39 @@ final class Db extends BaseService {
 	// -------------------------------------------------------------------------
 
 	/**
-	 * Begin a transaction.
+	 * Begin a transaction, optionally for a single explicit isolation level.
+	 *
+	 * Behavior:
+	 * - With $isolation === null, behavior is unchanged: the transaction runs under
+	 *   the connection/session default isolation.
+	 * - With an isolation given, the level is applied to THIS transaction only via
+	 *   the database "next transaction only" mechanism, before the transaction is
+	 *   opened. It does not change the session default and does not leak into any
+	 *   later transaction (see applyNextTransactionIsolation()).
 	 *
 	 * Notes:
 	 * - Opens a lazy connection if not yet connected (beginning a transaction is
 	 *   a meaningful first operation; this is intentional and correct).
+	 * - If the isolation cannot be applied, no transaction is opened and
+	 *   $inTransaction stays false, because the level is applied before both
+	 *   begin_transaction() and the flag assignment.
 	 *
+	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation|null $isolation Isolation for this transaction only, or null for the default.
 	 * @return void
 	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
 	 */
-	public function beginTransaction(): void {
+	public function beginTransaction(?TransactionIsolation $isolation = null): void {
 		if ($this->inTransaction) {
 			throw new DbQueryException('Transaction already active. Nested transactions are not supported.');
 		}
 
 		try {
-			$this->getConnection()->begin_transaction();
+			$conn = $this->getConnection();
+			if ($isolation !== null) {
+				// Bind the level to the next transaction, i.e. the one opened right below.
+				$this->applyNextTransactionIsolation($conn, $isolation);
+			}
+			$conn->begin_transaction();
 			$this->inTransaction = true;
 		} catch (\mysqli_sql_exception $e) {
 			throw new DbQueryException($e->getMessage(), (int)$e->getCode(), $e);
@@ -1009,12 +1027,13 @@ final class Db extends BaseService {
 	 *   });
 	 *
 	 * @param callable $callback Callback receiving the Db instance; may return any value.
+	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation|null $isolation Isolation for this transaction only, or null for the default.
 	 * @return mixed Callback return value.
 	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException When rollback also fails.
 	 * @throws \Throwable Rethrows the original callback exception when rollback succeeds.
 	 */
-	public function transaction(callable $callback): mixed {
-		$this->beginTransaction();
+	public function transaction(callable $callback, ?TransactionIsolation $isolation = null): mixed {
+		$this->beginTransaction($isolation);
 		try {
 			$result = $callback($this);
 			$this->commit();
@@ -1042,11 +1061,52 @@ final class Db extends BaseService {
 	 * Alias for transaction(). Provided for backward compatibility with LiteMySQLi callers.
 	 *
 	 * @param callable $callback Callback receiving the Db instance.
+	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation|null $isolation Isolation for this transaction only, or null for the default.
 	 * @return mixed Callback return value.
 	 * @throws \Throwable Rethrows on failure after rollback attempt.
 	 */
-	public function easyTransaction(callable $callback): mixed {
-		return $this->transaction($callback);
+	public function easyTransaction(callable $callback, ?TransactionIsolation $isolation = null): mixed {
+		return $this->transaction($callback, $isolation);
+	}
+
+
+	/**
+	 * Apply an isolation level to the NEXT transaction only, then let it revert.
+	 *
+	 * Behavior:
+	 * - Issues "SET TRANSACTION ISOLATION LEVEL <level>" with no SESSION/GLOBAL
+	 *   keyword. On both MySQL 8.0.16+ and MariaDB 10.6+ this scopes the level to
+	 *   the next single transaction in the session; afterwards the session default
+	 *   is restored automatically. The session default is never mutated, so there
+	 *   is nothing to save or restore and no leak into later transactions.
+	 * - Must run while no transaction is active and immediately before
+	 *   begin_transaction(), so the level binds to the transaction opened next.
+	 *   This statement does not cause an implicit commit on either engine.
+	 *
+	 * Notes:
+	 * - The level text is a fixed constant selected by a closed enum via match(),
+	 *   never caller-provided text, so embedding it directly is injection-safe.
+	 *   This mirrors the fixed-format time-zone statement in applySessionSettings().
+	 * - Not counted in queryCount: transaction-control and session statements are
+	 *   not counted elsewhere in this class (sql_mode, time_zone), and this stays
+	 *   consistent with that convention.
+	 * - mysqli runs under MYSQLI_REPORT_STRICT, so a failure throws
+	 *   \mysqli_sql_exception, which the caller (beginTransaction) converts to a
+	 *   DbQueryException before any transaction is considered active.
+	 *
+	 * @param \mysqli $conn Active connection.
+	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation $isolation Requested isolation for the next transaction.
+	 * @return void
+	 * @throws \mysqli_sql_exception On failure to apply the level.
+	 */
+	private function applyNextTransactionIsolation(\mysqli $conn, TransactionIsolation $isolation): void {
+		$level = match ($isolation) {
+			TransactionIsolation::ReadUncommitted => 'READ UNCOMMITTED',
+			TransactionIsolation::ReadCommitted   => 'READ COMMITTED',
+			TransactionIsolation::RepeatableRead  => 'REPEATABLE READ',
+			TransactionIsolation::Serializable    => 'SERIALIZABLE',
+		};
+		$conn->query('SET TRANSACTION ISOLATION LEVEL ' . $level);
 	}
 
 

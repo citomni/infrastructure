@@ -39,6 +39,7 @@ namespace CitOmni\Infrastructure\Exception;
  */
 final class DbQueryException extends DbException {
 	private const MYSQL_DUPLICATE_ENTRY_CODE = 1062;
+	private const MYSQL_DEADLOCK_CODE        = 1213;
 
 	/**
 	 * Check whether this query failure is a duplicate-entry violation.
@@ -55,5 +56,29 @@ final class DbQueryException extends DbException {
 	 */
 	public function isDuplicateEntry(): bool {
 		return $this->getCode() === self::MYSQL_DUPLICATE_ENTRY_CODE;
+	}
+
+	/**
+	 * Check whether this query failure is a transaction deadlock.
+	 *
+	 * Behavior:
+	 * - Returns true only for a real deadlock (MySQL/MariaDB error 1213,
+	 *   ER_LOCK_DEADLOCK), where the engine already rolled the transaction back
+	 *   and restarting the whole transaction is the sanctioned recovery.
+	 * - Uses the exception code passed by the Db service from mysqli.
+	 *
+	 * Notes:
+	 * - Error 1213 is shared by MySQL 8.0.16+ and MariaDB 10.6+.
+	 * - A lock-wait timeout (error 1205, ER_LOCK_WAIT_TIMEOUT) is deliberately NOT
+	 *   a deadlock: only the waiting statement is rolled back and the semantics
+	 *   differ, so it must not be reported here.
+	 * - This helper is additive and does not change existing exception behavior.
+	 *   It only classifies; it does not decide whether or how to retry - that is
+	 *   the workflow owner's responsibility.
+	 *
+	 * @return bool True when the query failed because of a transaction deadlock.
+	 */
+	public function isDeadlock(): bool {
+		return $this->getCode() === self::MYSQL_DEADLOCK_CODE;
 	}
 }
