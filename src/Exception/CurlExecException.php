@@ -20,6 +20,7 @@ namespace CitOmni\Infrastructure\Exception;
  *
  * Behavior:
  * - Represents execution-time failures such as DNS, TLS, timeout, connection, or option application errors.
+ * - Option application failures name the rejected CURLOPT_* option in the message.
  *
  * Notes:
  * - HTTP 4xx/5xx responses are not transport failures and should not use this exception.
@@ -28,27 +29,19 @@ namespace CitOmni\Infrastructure\Exception;
  */
 final class CurlExecException extends CurlException {
 
-	/** @var int */
-	private int $curlErrno;
+	private readonly int $curlErrno;
 
 	/**
 	 * Create a new transport-level cURL exception.
 	 *
-	 * @param string $message Exception message.
-	 * @param int $curlErrno cURL errno value.
-	 * @param string|null $requestMethod Normalized request method when available.
-	 * @param string|null $requestUrl Request URL when available.
-	 * @param array<string,mixed> $transferInfo Transfer info when available.
-	 * @param \Throwable|null $previous Previous exception.
+	 * @param  string               $message        Exception message.
+	 * @param  int                  $curlErrno      cURL errno value (also used as exception code).
+	 * @param  string|null          $requestMethod  Normalized request method when available.
+	 * @param  string|null          $requestUrl     Request URL when available.
+	 * @param  array<string,mixed>  $transferInfo   Transfer info when available.
+	 * @param  \Throwable|null      $previous       Previous exception.
 	 */
-	public function __construct(
-		string $message,
-		int $curlErrno = 0,
-		?string $requestMethod = null,
-		?string $requestUrl = null,
-		array $transferInfo = [],
-		?\Throwable $previous = null
-	) {
+	public function __construct(string $message, int $curlErrno = 0, ?string $requestMethod = null, ?string $requestUrl = null, array $transferInfo = [], ?\Throwable $previous = null) {
 		parent::__construct($message, $curlErrno, $requestMethod, $requestUrl, $transferInfo, $previous);
 
 		$this->curlErrno = $curlErrno;
@@ -57,10 +50,9 @@ final class CurlExecException extends CurlException {
 	/**
 	 * Get the cURL errno value.
 	 *
-	 * @return int cURL errno.
+	 * @return int  cURL errno (0 when the failure did not originate from curl_exec()).
 	 */
-	public function getCurlErrno(): int
-	{
+	public function getCurlErrno(): int {
 		return $this->curlErrno;
 	}
 

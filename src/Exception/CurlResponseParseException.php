@@ -19,10 +19,12 @@ namespace CitOmni\Infrastructure\Exception;
  * Thrown when a received response cannot be parsed as expected.
  *
  * Behavior:
- * - Represents post-transfer parsing failures inside the Curl service.
+ * - Represents post-transfer parsing failures in the Curl exception hierarchy.
  *
  * Notes:
- * - Typical causes include invalid header/body split boundaries when headers were captured.
+ * - The built-in Curl service no longer throws this: response headers are captured through
+ *   CURLOPT_HEADERFUNCTION, so there is no header/body split step that can fail.
+ * - Kept so existing catch blocks and the public exception hierarchy remain valid.
  *
  * @throws void
  */

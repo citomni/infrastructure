@@ -99,7 +99,7 @@ final class Registry {
 			'timeout'           => 30,
 			'connect_timeout'   => 10,
 			'follow_redirects'  => false,
-			'max_redirects'     => 0,
+			'max_redirects'     => 10, // Only applies when follow_redirects is true.
 			'user_agent'        => 'CitOmni cURL',
 			'verify_peer'       => true,
 			'verify_host'       => 2,
@@ -111,6 +111,7 @@ final class Registry {
 			'log_errors'        => true,
 			'log_success'       => false,
 			'log_file'          => 'curl.jsonl',
+			'reuse_connections' => true, // Share DNS cache + connection pool across calls within one request/process.
 		],
 
 
