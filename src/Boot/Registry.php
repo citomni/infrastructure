@@ -30,6 +30,7 @@ final class Registry {
 
 		'log'			=> \CitOmni\Infrastructure\Service\Log::class,
 		'txt'			=> \CitOmni\Infrastructure\Service\Txt::class,
+		'secrets'		=> \CitOmni\Infrastructure\Service\Secrets::class,
 		'mailer'		=> \CitOmni\Infrastructure\Service\Mailer::class,
 		'curl'			=> \CitOmni\Infrastructure\Service\Curl::class,
 		'db'			=> \CitOmni\Infrastructure\Service\Db::class,
