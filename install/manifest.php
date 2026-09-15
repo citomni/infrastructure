@@ -18,9 +18,21 @@ return [
 	'version' => 1,
 	'files' => [
 		[
-			'target' => 'var/secrets/app.secret.php.tpl',
-			'source' => 'install/scaffold/var/secrets/app.secret.php.tpl.stub',
-			'type' => 'secret-template',
+			'target' => 'var/secrets/app.secret.dev.php',
+			'source' => 'install/scaffold/var/secrets/app.secret.dev.php.stub',
+			'type' => 'secret-file',
+			'policy' => 'create-only',
+		],
+		[
+			'target' => 'var/secrets/app.secret.stage.php',
+			'source' => 'install/scaffold/var/secrets/app.secret.stage.php.stub',
+			'type' => 'secret-file',
+			'policy' => 'create-only',
+		],
+		[
+			'target' => 'var/secrets/app.secret.prod.php',
+			'source' => 'install/scaffold/var/secrets/app.secret.prod.php.stub',
+			'type' => 'secret-file',
 			'policy' => 'create-only',
 		],
 	],

@@ -20,19 +20,27 @@ use CitOmni\Kernel\Service\BaseService;
 /**
  * Secrets: Read application secrets from the app-local secret store.
  *
- * The store is a side-effect-free PHP file at /var/secrets/app.secret.php that
- * returns a flat string-to-string map. Keys may use dotted names for readable
- * namespacing, for example `mail.smtp.password`.
+ * The store is a side-effect-free, environment-specific PHP file under
+ * /var/secrets that returns a flat string-to-string map. The active file is
+ * selected from CITOMNI_ENVIRONMENT:
+ * - dev:   /var/secrets/app.secret.dev.php
+ * - stage: /var/secrets/app.secret.stage.php
+ * - prod:  /var/secrets/app.secret.prod.php
+ *
+ * Keys may use dotted names for readable namespacing, for example
+ * `mail.smtp.password`.
  *
  * Behavior:
- * - Loads the secret file lazily on the first has() or get() call.
+ * - Resolves the active secret file from CITOMNI_ENVIRONMENT.
+ * - Loads that secret file lazily on the first has() or get() call.
  * - Memoizes the validated map for the lifetime of the App instance.
  * - Treats a missing secret file as an empty store.
  * - Fails fast when an existing secret file is invalid or unreadable.
  * - Never exposes the complete secret map through the public API or debug output.
  *
  * Notes:
- * - The real secret file must remain outside version control.
+ * - Real secret files must remain outside version control.
+ * - No fallback occurs between environments; each environment has its own store.
  * - Secret rotation is visible to new App instances; an existing instance keeps
  *   its already loaded values for deterministic request/process behavior.
  * - No SQL or transport concerns.
@@ -44,8 +52,6 @@ use CitOmni\Kernel\Service\BaseService;
  *   }
  */
 final class Secrets extends BaseService {
-
-	private const SECRET_FILE = '/var/secrets/app.secret.php';
 
 	private bool $loaded = false;
 
@@ -59,7 +65,7 @@ final class Secrets extends BaseService {
 	 * @param string $key Exact secret key.
 	 * @return bool True when the secret exists.
 	 * @throws \InvalidArgumentException When the key is empty or padded with whitespace.
-	 * @throws \RuntimeException When the secret file exists but cannot be read.
+	 * @throws \RuntimeException When the environment is invalid or the secret file cannot be read.
 	 * @throws \UnexpectedValueException When the secret file or its contents are invalid.
 	 */
 	public function has(string $key): bool {
@@ -77,7 +83,7 @@ final class Secrets extends BaseService {
 	 * @return string Secret value.
 	 * @throws \InvalidArgumentException When the key is empty or padded with whitespace.
 	 * @throws \OutOfBoundsException When the requested secret does not exist.
-	 * @throws \RuntimeException When the secret file exists but cannot be read.
+	 * @throws \RuntimeException When the environment is invalid or the secret file cannot be read.
 	 * @throws \UnexpectedValueException When the secret file or its contents are invalid.
 	 */
 	public function get(string $key): string {
@@ -121,7 +127,7 @@ final class Secrets extends BaseService {
 			return;
 		}
 
-		$path = $this->app->getAppRoot() . self::SECRET_FILE;
+		$path = $this->secretFile();
 
 		if (!\file_exists($path)) {
 			$this->loaded = true;
@@ -157,6 +163,32 @@ final class Secrets extends BaseService {
 
 		$this->secrets = $data;
 		$this->loaded = true;
+	}
+
+
+	/**
+	 * Resolve the secret file for the active application environment.
+	 *
+	 * @return string Absolute secret file path.
+	 * @throws \RuntimeException When CITOMNI_ENVIRONMENT is missing or unsupported.
+	 */
+	private function secretFile(): string {
+		if (!\defined('CITOMNI_ENVIRONMENT')) {
+			throw new \RuntimeException('CITOMNI_ENVIRONMENT is required to resolve application secrets.');
+		}
+
+		$environment = (string)\constant('CITOMNI_ENVIRONMENT');
+
+		$file = match ($environment) {
+			'dev' => 'app.secret.dev.php',
+			'stage' => 'app.secret.stage.php',
+			'prod' => 'app.secret.prod.php',
+			default => throw new \RuntimeException(
+				"Unsupported CITOMNI_ENVIRONMENT '{$environment}' for application secrets."
+			),
+		};
+
+		return $this->app->getAppRoot() . '/var/secrets/' . $file;
 	}
 
 

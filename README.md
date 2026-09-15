@@ -184,7 +184,13 @@ At runtime the App builds config as:
 ],
 ```
 
-Database and authenticated SMTP passwords are application secrets, not cfg values. Populate the non-versioned `var/secrets/app.secret.php` file instead:
+Database and authenticated SMTP passwords are application secrets, not cfg values. Secrets are environment-specific and remain outside version control. `CITOMNI_ENVIRONMENT` selects exactly one runtime file:
+
+- `dev` uses `var/secrets/app.secret.dev.php`
+- `stage` uses `var/secrets/app.secret.stage.php`
+- `prod` uses `var/secrets/app.secret.prod.php`
+
+Populate the file for the relevant environment:
 
 ```php
 return [
@@ -312,7 +318,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/vendor/autoload.php';
 
-define('CITOMNI_ENVIRONMENT', 'cli');
+define('CITOMNI_ENVIRONMENT', 'dev'); // Use dev, stage, or prod for the target environment.
 define('CITOMNI_APP_PATH', __DIR__);
 
 $app = new \CitOmni\Kernel\App(__DIR__ . '/config', \CitOmni\Kernel\Mode::CLI);
