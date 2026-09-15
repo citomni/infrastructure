@@ -118,7 +118,6 @@ At runtime the App builds config as:
 'db' => [
 	'host' => 'localhost',
 	'user' => 'root',
-	'pass' => '',
 	'name' => 'citomni',
 	'charset' => 'utf8mb4',
 ],
@@ -149,7 +148,6 @@ At runtime the App builds config as:
 		'encryption' => null,     // 'tls' | 'ssl' | null
 		'auth'       => true,
 		'username'   => '',
-		'password'   => '',
 		'auto_tls'   => true,
 		'timeout'    => 15,
 		'keepalive'  => false,
@@ -184,6 +182,15 @@ At runtime the App builds config as:
 		'methods'    => ['GET'],
 	],
 ],
+```
+
+Database and authenticated SMTP passwords are application secrets, not cfg values. Populate the non-versioned `var/secrets/app.secret.php` file instead:
+
+```php
+return [
+	'db.password' => 'your-database-password',
+	'mail.smtp.password' => 'your-smtp-password',
+];
 ```
 
 > The HTTP router reads **routes as raw arrays** (`$this->app->cfg->routes[...]`).

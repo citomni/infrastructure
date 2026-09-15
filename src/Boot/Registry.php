@@ -53,13 +53,13 @@ final class Registry {
 
 		/*
 		 *------------------------------------------------------------------
-		 * DATABASE CREDENTIALS
+		 * DATABASE SETTINGS
 		 *------------------------------------------------------------------
 		 */		
 		'db' => [
 			'host'		=> 'localhost',
 			'user'		=> 'citomni',
-			'pass'		=> 'citomniDbPw123_',
+			// Password is read from $app->secrets key `db.password`.
 			'name'		=> 'citomni',
 			'charset'	=> 'utf8mb4',
 		],
@@ -150,7 +150,7 @@ final class Registry {
 				'encryption' => null,  // 'tls' | 'ssl' | null
 				'auth'       => true,
 				'username'   => '',
-				'password'   => '',
+				// Password is read from $app->secrets key `mail.smtp.password`.
 
 				// Operational tuning
 				'auto_tls'   => true,  // PHPMailer::SMTPAutoTLS

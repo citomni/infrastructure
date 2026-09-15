@@ -30,6 +30,7 @@ use PHPMailer\PHPMailer\PHPMailer;
  *
  * Collaborators:
  * - Reads: $this->app->cfg->mail (transport, defaults, logging policy).
+ * - Reads: $this->app->secrets key `mail.smtp.password` when SMTP auth is used.
  * - Writes: $this->app->log (mail_log.jsonl, mailer_errors.jsonl).
  * - Optional: $this->app->request (IP detection in HTTP; falls back safely in CLI).
  *
@@ -46,7 +47,7 @@ use PHPMailer\PHPMailer\PHPMailer;
  * - mail.smtp.encryption (string) - "tls"|"ssl"|"" (none). Default: "".
  * - mail.smtp.auth (bool) - Enable SMTP auth. Default: true.
  * - mail.smtp.username (string) - SMTP username. Default: "".
- * - mail.smtp.password (string) - SMTP password. Default: "".
+ * - Secret `mail.smtp.password` (string) - Required when SMTP auth is enabled; may be empty.
  * - mail.smtp.auto_tls (bool) - Opportunistic STARTTLS. Default: true.
  * - mail.smtp.timeout (int) - Seconds before SMTP timeout. Default: 15.
  * - mail.smtp.keepalive (bool) - Keep the SMTP connection alive. Default: false.
@@ -191,7 +192,9 @@ class Mailer extends BaseService {
 	 *
 	 * Behavior:
 	 * - Read mail.transport and switch PHPMailer mode: smtp | sendmail | qmail | mail.
-	 * - For SMTP: Set Host, Port, SMTPSecure from encryption (tls|ssl|none), SMTPAuth, Username, Password.
+	 * - For SMTP: Set Host, Port, SMTPSecure from encryption (tls|ssl|none), SMTPAuth, and Username.
+	 * - Reject the legacy mail.smtp.password cfg key instead of silently leaving credentials in config.
+	 * - SMTP password is deliberately not loaded here; send() resolves it lazily from Secrets.
 	 * - For SMTP: Apply operational tuning (SMTPAutoTLS, Timeout, SMTPKeepAlive).
 	 * - For sendmail/qmail: Set Sendmail binary path.
 	 * - Disable immediate debug output (SMTPDebug=0, Debugoutput is a no-op); send() handles transcript capture.
@@ -218,10 +221,10 @@ class Mailer extends BaseService {
 	 *   $this->applyTransportFromCfg();
 	 *
 	 * Failure:
-	 * - None: Property assignment only; no exceptions are thrown here.
+	 * - Throws when the legacy mail.smtp.password cfg key is still present.
 	 *
 	 * @return void
-	 * @throws void This method does not throw.
+	 * @throws \UnexpectedValueException When mail.smtp.password is still configured in cfg.
 	 */
 	protected function applyTransportFromCfg(): void {
 		$mail = $this->app->cfg->mail ?? null;
@@ -231,6 +234,11 @@ class Mailer extends BaseService {
 				$this->mailer->isSMTP();
 				
 				$smtp = $mail->smtp ?? null;
+				if (isset($smtp->password)) {
+					throw new \UnexpectedValueException(
+						'Mailer config key "mail.smtp.password" is no longer supported; use secret "mail.smtp.password".'
+					);
+				}
 				
 				// Host can be a semicolon-separated list; PHPMailer supports this natively.
 				$this->mailer->Host = (string)($smtp->host ?? '');
@@ -251,8 +259,10 @@ class Mailer extends BaseService {
 				$this->mailer->SMTPAuth = (bool)($smtp->auth ?? true);
 				if ($this->mailer->SMTPAuth) {
 					$this->mailer->Username = (string)($smtp->username ?? '');
-					$this->mailer->Password = (string)($smtp->password ?? '');
+				} else {
+					$this->mailer->Username = '';
 				}
+				$this->mailer->Password = '';
 				
 				// Operational tuning
 				$this->mailer->SMTPAutoTLS = (bool)($smtp->auto_tls ?? true);
@@ -549,6 +559,7 @@ class Mailer extends BaseService {
 	 * Behavior:
 	 * - Normalize bodies: If only AltBody is set, force text mode; if HTML body lacks AltBody, auto-generate it.
 	 * - Capture optional SMTP transcript in memory (no echo) per mail.logging.debug_transcript and max_lines.
+	 * - Resolve `mail.smtp.password` lazily from Secrets immediately before authenticated SMTP send.
 	 * - Attempt transport send via PHPMailer::send() and measure duration.
 	 * - On success in dev and when enabled, write a summary entry to mail_log.jsonl.
 	 * - On failure, log a structured error to mailer_errors.jsonl and populate lastError.
@@ -579,7 +590,9 @@ class Mailer extends BaseService {
 	 * - Transport errors are caught; a structured record is logged and the method returns false.
 	 *
 	 * @return bool True if the message was accepted by the transport; false otherwise.
-	 * @throws \PHPMailer\PHPMailer\Exception Never thrown: Caught internally and converted to false.
+	 * @throws \OutOfBoundsException When authenticated SMTP is enabled but `mail.smtp.password` is missing.
+	 * @throws \RuntimeException When the application secret store cannot be read.
+	 * @throws \UnexpectedValueException When the application secret store is invalid.
 	 */
 	public function send(): bool {
 		
@@ -611,6 +624,7 @@ class Mailer extends BaseService {
 		};
 
 		try {
+			$this->applySecretCredentials();
 			$ok = $this->mailer->send();
 
 			// Optional success log in DEV
@@ -728,8 +742,31 @@ class Mailer extends BaseService {
 			return false;
 			
 		} finally {
+			$this->mailer->Password = '';
 			$this->resetMessage();
 		}
+	}
+
+
+	/**
+	 * Apply secret transport credentials immediately before sending.
+	 *
+	 * Behavior:
+	 * - Loads no secret for non-SMTP transports or when SMTP authentication is disabled.
+	 * - Resolves the SMTP password through the application Secrets service only when needed.
+	 *
+	 * @return void
+	 * @throws \OutOfBoundsException When `mail.smtp.password` is missing.
+	 * @throws \RuntimeException When the application secret store cannot be read.
+	 * @throws \UnexpectedValueException When the application secret store is invalid.
+	 */
+	private function applySecretCredentials(): void {
+		if ($this->mailer->Mailer !== 'smtp' || !$this->mailer->SMTPAuth) {
+			$this->mailer->Password = '';
+			return;
+		}
+
+		$this->mailer->Password = $this->app->secrets->get('mail.smtp.password');
 	}
 
 

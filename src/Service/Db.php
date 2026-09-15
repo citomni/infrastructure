@@ -24,8 +24,9 @@ use CitOmni\Kernel\Service\BaseService;
  * Db: MySQLi database service with lazy connection, prepared statements, and bounded statement cache.
  *
  * Wraps MySQLi directly: no ORM, no query builder, no hidden state.
- * The physical connection is deferred until first use. All configuration
- * is read and validated eagerly in init() before any connection is opened.
+ * The physical connection is deferred until first use. Non-secret configuration
+ * is read and validated eagerly in init(); the password is resolved lazily from
+ * the Secrets service only when a connection is opened.
  *
  * Behavior:
  * - mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT) is set in init(). This is a
@@ -41,10 +42,10 @@ use CitOmni\Kernel\Service\BaseService;
  * - select() and its dependents require mysqlnd. For mysqlnd-free streaming use selectNoMysqlnd().
  * - insertBatch() owns its own transaction in the chunked fallback. Do not call from within
  *   an active transaction; wrap the outer operation instead.
- * - Config key for password is "pass" (matches $app->cfg->db->pass).
+ * - Database password is read from $app->secrets key `db.password`.
  *
  * Config node: $app->cfg->db
- *   host, user, pass, name               (required)
+ *   host, user, name                     (required)
  *   charset                              (optional; default: utf8mb4)
  *   port                                 (optional; default: 3306)
  *   socket                               (optional; default: null)
@@ -70,13 +71,10 @@ final class Db extends BaseService {
 	private const BATCH_CHUNK_SIZE        = 1000;
 
 	// Connection settings resolved once in init(). Never read from cfg again after that.
-	// $cfgPass is retained for in-place reconnect(). var_dump() output is redacted via
-	// __debugInfo(), but print_r(), var_export(), serialize() and exception stack
-	// traces are NOT covered. Avoid dumping, serializing or tracing this instance
-	// where credentials must not leak.
+	// The database password is intentionally not retained on this service; it is
+	// resolved from the Secrets service only when opening a connection.
 	private string  $cfgHost    = '';
 	private string  $cfgUser    = '';
-	private string  $cfgPass    = '';
 	private string  $cfgName    = '';
 	private string  $cfgCharset = self::DEFAULT_CHARSET;
 	private int     $cfgPort    = self::DEFAULT_PORT;
@@ -115,8 +113,10 @@ final class Db extends BaseService {
 	 * Read and validate all database configuration. Called once by BaseService constructor.
 	 *
 	 * Behavior:
-	 * - Reads $app->cfg->db and merges with service options (options win on conflict).
-	 * - Validates mandatory keys and fails fast on missing or invalid values.
+	 * - Reads non-secret settings from $app->cfg->db and merges with service options (options win on conflict).
+	 * - Validates mandatory non-secret settings and fails fast on missing or invalid values.
+	 * - Rejects the legacy `db.pass` setting so committed credentials cannot be silently ignored.
+	 * - Does not read the database password; it is resolved lazily when a connection is opened.
 	 * - Sets mysqli global reporting mode (MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT).
 	 * - Does NOT open a database connection.
 	 *
@@ -139,10 +139,15 @@ final class Db extends BaseService {
 		$opt = $this->options + $cfg;
 		$this->options = []; // free; never read again
 
+		if (\array_key_exists('pass', $opt)) {
+			throw new DbConnectException(
+				'DB config key "pass" is no longer supported; use secret "db.password".'
+			);
+		}
+
 		// Mandatory.
 		$this->cfgHost = \trim((string)($opt['host'] ?? ''));
 		$this->cfgUser = \trim((string)($opt['user'] ?? ''));
-		$this->cfgPass = (string)($opt['pass'] ?? '');
 		$this->cfgName = \trim((string)($opt['name'] ?? ''));
 
 		if ($this->cfgHost === '') {
@@ -1246,9 +1251,8 @@ final class Db extends BaseService {
 	/**
 	 * Return safe debug information for var_dump().
 	 *
-	 * Password output is deliberately redacted because connection credentials are
-	 * retained for reconnect(). This affects var_dump() only; print_r(),
-	 * var_export(), serialize() and exception stack traces are not covered.
+	 * Database credentials are not included; the password is not retained on this
+	 * service and the username is treated as non-secret connection configuration.
 	 *
 	 * @return array<string,mixed> Safe diagnostic state.
 	 */
@@ -1256,7 +1260,6 @@ final class Db extends BaseService {
 		return [
 			'cfgHost' => $this->cfgHost,
 			'cfgUser' => $this->cfgUser,
-			'cfgPass' => '[redacted]',
 			'cfgName' => $this->cfgName,
 			'cfgCharset' => $this->cfgCharset,
 			'cfgPort' => $this->cfgPort,
@@ -1413,6 +1416,7 @@ final class Db extends BaseService {
 			return $this->connection;
 		}
 
+		$password = $this->databasePassword();
 		$conn = null;
 		try {
 			$conn = \mysqli_init();
@@ -1423,7 +1427,7 @@ final class Db extends BaseService {
 			$conn->real_connect(
 				$this->cfgHost,
 				$this->cfgUser,
-				$this->cfgPass,
+				$password,
 				$this->cfgName,
 				$this->cfgPort,
 				$this->cfgSocket
@@ -1443,6 +1447,21 @@ final class Db extends BaseService {
 				try { $conn->close(); } catch (\Throwable) {}
 			}
 			throw $e;
+		}
+	}
+
+
+	/**
+	 * Resolve the database password from the application secret store.
+	 *
+	 * @return string Database password, which may be an empty string.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException When the secret is missing or invalid.
+	 */
+	private function databasePassword(): string {
+		try {
+			return $this->app->secrets->get('db.password');
+		} catch (\RuntimeException $e) {
+			throw new DbConnectException('DB secret "db.password" is missing or invalid.', 0, $e);
 		}
 	}
 
