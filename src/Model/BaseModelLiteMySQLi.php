@@ -35,9 +35,10 @@ use LiteMySQLi\LiteMySQLi;
  * Configuration keys:
  * - db.host (string, required) - Database host.
  * - db.user (string, required) - Username.
- * - db.pass (string, optional) - Password.
  * - db.name (string, required) - Schema/database name.
  * - db.charset (string, default: "utf8mb4") - Connection charset.
+ * Secrets:
+ * - db.password (string, required) - Database password.
  *
  * Error handling:
  * - Fail fast; no internal try/catch. Exceptions bubble to the global handler.
@@ -152,7 +153,7 @@ abstract class BaseModelLiteMySQLi {
 		$this->conn = new LiteMySQLi(
 			(string)$cfg->host,
 			(string)$cfg->user,
-			(string)$cfg->pass,
+			$this->app->secrets->get('db.password'),
 			(string)$cfg->name,
 			$cfg->charset ?? 'utf8mb4'
 		);
