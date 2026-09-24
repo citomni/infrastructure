@@ -242,13 +242,13 @@ final class Registry {
 	
 	public const ROUTES_HTTP = [
 	
-		'/kontakt.html' => [
-			'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
-			'action' => 'contact',
-			'methods' => ['GET','POST'],
-			'template_file' => 'public/contact.html',
-			'template_layer' => 'citomni/infrastructure'
-		],
+		// '/kontakt.html' => [
+			// 'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
+			// 'action' => 'contact',
+			// 'methods' => ['GET','POST'],
+			// 'template_file' => 'public/contact.html',
+			// 'template_layer' => 'citomni/infrastructure'
+		// ],
 		'/captcha' => [
 			'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
 			'action' => 'captcha',

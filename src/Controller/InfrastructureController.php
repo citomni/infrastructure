@@ -70,6 +70,7 @@ class InfrastructureController extends BaseController {
 	 * @return void
 	 * @throws \Throwable Unhandled failure in services or rendering.
 	 */
+/*
 	public function contact(): void {
 		$error_msg		= '';
 		$success_msg	= '';
@@ -164,6 +165,8 @@ class InfrastructureController extends BaseController {
 			]
 		);
 	}
+*/
+
 
 
 	/**
