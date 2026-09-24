@@ -24,6 +24,7 @@ namespace CitOmni\Infrastructure\Exception;
  *
  * Notes:
  * - This is the common parent for configuration, execution, and response parsing failures.
+ * - Query values marked sensitive by Curl are redacted from URL-bearing exception context.
  *
  * @throws void
  */
@@ -44,8 +45,8 @@ class CurlException extends \RuntimeException {
 	 * @param string $message Exception message.
 	 * @param int $code Exception code.
 	 * @param string|null $requestMethod Normalized request method when available.
-	 * @param string|null $requestUrl Request URL when available.
-	 * @param array<string,mixed> $transferInfo Transfer info when available.
+	 * @param string|null $requestUrl Request URL when available; marked sensitive query values may be redacted.
+	 * @param array<string,mixed> $transferInfo Transfer info when available; URL-bearing fields may be redacted.
 	 * @param \Throwable|null $previous Previous exception.
 	 */
 	public function __construct(string $message, int $code = 0, ?string $requestMethod = null, ?string $requestUrl = null, array $transferInfo = [], ?\Throwable $previous = null) {
@@ -68,7 +69,7 @@ class CurlException extends \RuntimeException {
 	/**
 	 * Get the request URL, if available.
 	 *
-	 * @return string|null Request URL or null.
+	 * @return string|null Request URL or null; marked sensitive query values may be redacted.
 	 */
 	public function getRequestUrl(): ?string {
 		return $this->requestUrl;
@@ -77,7 +78,7 @@ class CurlException extends \RuntimeException {
 	/**
 	 * Get transfer info collected at failure time.
 	 *
-	 * @return array<string,mixed> Transfer info array.
+	 * @return array<string,mixed> Transfer info array with marked sensitive query values redacted from URL-bearing fields.
 	 */
 	public function getTransferInfo(): array {
 		return $this->transferInfo;

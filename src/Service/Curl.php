@@ -63,6 +63,7 @@ final class Curl extends BaseService {
 		'headers'          => true,
 		'body'             => true,
 		'query'            => true,
+		'sensitive_query_keys' => true,
 		'timeout'          => true,
 		'connect_timeout'  => true,
 		'follow_redirects' => true,
@@ -129,6 +130,7 @@ final class Curl extends BaseService {
 			'headers'          => [],
 			'body'             => null,
 			'query'            => [],
+			'sensitive_query_keys' => [],
 			'timeout'          => $cfg->timeout ?? 30,
 			'connect_timeout'  => $cfg->connect_timeout ?? 10,
 			'follow_redirects' => (bool)($cfg->follow_redirects ?? false),
@@ -191,6 +193,7 @@ final class Curl extends BaseService {
 	 * - headers           list<string>          Raw "Name: value" lines. No CR/LF/NUL.
 	 * - body              string|null           Raw request body. Ignored for HEAD.
 	 * - query             array                 Appended with http_build_query (RFC 3986), fragment-safe.
+	 * - sensitive_query_keys list<string>         Case-sensitive top-level query names whose scalar or nested values are redacted from exposed URL metadata.
 	 * - timeout           int|float|string      Total transfer timeout in seconds. 0 = none. Fractions allowed.
 	 * - connect_timeout   int|float|string      Connect timeout in seconds. 0 = libcurl default. Fractions allowed.
 	 * - follow_redirects  bool                  Follow Location headers.
@@ -221,6 +224,7 @@ final class Curl extends BaseService {
 	 * - Integer timeouts map to CURLOPT_TIMEOUT / CURLOPT_CONNECTTIMEOUT; fractional ones map to
 	 *   the *_MS variants, rounded up to at least 1 ms (never silently to "no timeout").
 	 * - The cURL handle is released right after the transfer, which is when libcurl writes the cookie jar.
+	 * - Sensitive query values are sent unchanged, but are redacted from logs, exceptions, and returned URL metadata.
 	 *
 	 * Notes:
 	 * - Sub-second timeouts can fail immediately on libcurl builds using the synchronous resolver
@@ -300,7 +304,7 @@ final class Curl extends BaseService {
 		// -- 2. Run the transfer -------------------------------------------
 		$handle = \curl_init();
 		if ($handle === false) {
-			throw new CurlExecException('Failed to initialize cURL handle.', 0, $request['method'], $request['url']);
+			throw new CurlExecException('Failed to initialize cURL handle.', 0, $request['method'], $request['_exposed_url']);
 		}
 
 		if (!\curl_setopt_array($handle, $options)) {
@@ -308,7 +312,7 @@ final class Curl extends BaseService {
 				'Failed to apply cURL options: ' . $this->describeRejectedOption($handle, $options) . ' was rejected.',
 				0,
 				$request['method'],
-				$request['url']
+				$request['_exposed_url']
 			);
 		}
 
@@ -322,6 +326,14 @@ final class Curl extends BaseService {
 		// flush deterministic: it has happened before execute() returns or throws.
 		unset($handle);
 
+		if ($request['sensitive_query_keys'] !== []) {
+			if ($result === false && $error !== '') {
+				$error = $this->redactUrlOccurrences($error, $request, $info);
+			}
+
+			$info = $this->redactTransferInfo($info, $request['sensitive_query_keys']);
+		}
+
 		// -- 3. Map the outcome --------------------------------------------
 		if ($result === false) {
 			if ($error === '') {
@@ -330,14 +342,14 @@ final class Curl extends BaseService {
 
 			$this->logError($request, $errno, $error, $info);
 
-			throw new CurlExecException('cURL transport failed: ' . $error, $errno, $request['method'], $request['url'], $info);
+			throw new CurlExecException('cURL transport failed: ' . $error, $errno, $request['method'], $request['_exposed_url'], $info);
 		}
 
 		// Only reachable when curl_options redirected the body (e.g. CURLOPT_RETURNTRANSFER=false or CURLOPT_FILE).
 		if (!\is_string($result)) {
 			$this->logError($request, 0, 'Unexpected non-string cURL result.', $info);
 
-			throw new CurlExecException('Unexpected non-string cURL result.', 0, $request['method'], $request['url'], $info);
+			throw new CurlExecException('Unexpected non-string cURL result.', 0, $request['method'], $request['_exposed_url'], $info);
 		}
 
 		$response = $this->buildResponse($request, $result, $info, $headersRaw, $headerLines);
@@ -373,7 +385,9 @@ final class Curl extends BaseService {
 			throw new CurlConfigException('Request key "url" is required and must be a non-empty string.');
 		}
 
-		$request['url'] = $this->buildUrl($request['url'], $request['query']);
+		$request['sensitive_query_keys'] = $this->normalizeSensitiveQueryKeys($request['sensitive_query_keys']);
+		$request['url']                  = $this->buildUrl($request['url'], $request['query']);
+		$request['_exposed_url']         = $this->redactQueryValues($request['url'], $request['sensitive_query_keys']);
 
 		$method = $request['method'] ?? 'GET';
 		$method = \is_string($method) ? \strtoupper(\trim($method)) : '';
@@ -713,6 +727,222 @@ final class Curl extends BaseService {
 
 
 	/**
+	 * Normalize sensitive query parameter names into a lookup map.
+	 *
+	 * @param  mixed  $value  Raw sensitive query key list.
+	 * @return array<string,true>  Exact, case-sensitive key lookup map.
+	 * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When the value is not a list of non-empty strings.
+	 */
+	private function normalizeSensitiveQueryKeys(mixed $value): array {
+		if (!\is_array($value) || !\array_is_list($value)) {
+			throw new CurlConfigException('Request key "sensitive_query_keys" must be a list of non-empty strings.');
+		}
+
+		$keys = [];
+
+		foreach ($value as $key) {
+			if (!\is_string($key) || $key === '') {
+				throw new CurlConfigException('Request key "sensitive_query_keys" must be a list of non-empty strings.');
+			}
+
+			$keys[$key] = true;
+		}
+
+		return $keys;
+	}
+
+
+	/**
+	 * Redact selected query parameter values without rebuilding or re-encoding the URL.
+	 *
+	 * Behavior:
+	 * - Matches decoded parameter names exactly and case-sensitively.
+	 * - A marked top-level key also covers PHP bracket notation such as key[0] and key[nested][value].
+	 * - Redacts every matching occurrence, including duplicates.
+	 * - Preserves parameter order, separators, non-sensitive encoding, and fragments.
+	 *
+	 * @param  string              $url                 URL or request target to redact.
+	 * @param  array<string,true>  $sensitiveQueryKeys  Sensitive query key lookup map.
+	 * @return string  Redacted URL, or the original string when nothing matches.
+	 */
+	private function redactQueryValues(string $url, array $sensitiveQueryKeys): string {
+		if ($sensitiveQueryKeys === []) {
+			return $url;
+		}
+
+		$queryPos = \strpos($url, '?');
+		if ($queryPos === false) {
+			return $url;
+		}
+
+		$fragmentPos = \strpos($url, '#');
+		if ($fragmentPos !== false && $fragmentPos < $queryPos) {
+			return $url;
+		}
+
+		$queryStart = $queryPos + 1;
+		$queryEnd   = $fragmentPos === false ? \strlen($url) : $fragmentPos;
+		if ($queryStart >= $queryEnd) {
+			return $url;
+		}
+
+		$query        = \substr($url, $queryStart, $queryEnd - $queryStart);
+		$queryLength  = \strlen($query);
+		$segmentStart = 0;
+		$redacted     = '';
+		$changed      = false;
+
+		for ($i = 0; $i <= $queryLength; ++$i) {
+			if ($i < $queryLength && $query[$i] !== '&' && $query[$i] !== ';') {
+				continue;
+			}
+
+			$segment    = \substr($query, $segmentStart, $i - $segmentStart);
+			$equalsPos  = \strpos($segment, '=');
+			$encodedKey = $equalsPos === false ? $segment : \substr($segment, 0, $equalsPos);
+			$isSensitive = false;
+
+			if ($equalsPos !== false && $encodedKey !== '') {
+				$decodedKey  = \rawurldecode($encodedKey);
+				$isSensitive = isset($sensitiveQueryKeys[$decodedKey]);
+
+				if (!$isSensitive) {
+					$bracketPos = \strpos($decodedKey, '[');
+					if ($bracketPos !== false) {
+						$isSensitive = isset($sensitiveQueryKeys[\substr($decodedKey, 0, $bracketPos)]);
+					}
+				}
+			}
+
+			if ($isSensitive) {
+				$redacted .= $encodedKey . '=[REDACTED]';
+				$changed = true;
+			} else {
+				$redacted .= $segment;
+			}
+
+			if ($i < $queryLength) {
+				$redacted .= $query[$i];
+			}
+
+			$segmentStart = $i + 1;
+		}
+
+		if (!$changed) {
+			return $url;
+		}
+
+		return \substr($url, 0, $queryStart) . $redacted . \substr($url, $queryEnd);
+	}
+
+
+	/**
+	 * Redact URL-bearing fields returned by curl_getinfo().
+	 *
+	 * @param  array<string,mixed>  $info                Transfer info.
+	 * @param  array<string,true>   $sensitiveQueryKeys  Sensitive query key lookup map.
+	 * @return array<string,mixed>  Transfer info safe for exceptions and returned metadata.
+	 */
+	private function redactTransferInfo(array $info, array $sensitiveQueryKeys): array {
+		foreach (['url', 'redirect_url'] as $key) {
+			if (isset($info[$key]) && \is_string($info[$key])) {
+				$info[$key] = $this->redactQueryValues($info[$key], $sensitiveQueryKeys);
+			}
+		}
+
+		if (isset($info['request_header']) && \is_string($info['request_header'])) {
+			$info['request_header'] = $this->redactRequestHeader($info['request_header'], $sensitiveQueryKeys);
+		}
+
+		return $info;
+	}
+
+
+	/**
+	 * Redact URL-bearing request-target and Referer values in CURLINFO_HEADER_OUT.
+	 *
+	 * @param  string              $header              Raw request header block.
+	 * @param  array<string,true>  $sensitiveQueryKeys  Sensitive query key lookup map.
+	 * @return string  Header block with sensitive query values redacted from exposed URLs.
+	 */
+	private function redactRequestHeader(string $header, array $sensitiveQueryKeys): string {
+		$lines   = \explode("\n", $header);
+		$changed = false;
+
+		foreach ($lines as $index => $line) {
+			if ($index === 0) {
+				$firstSpace = \strpos($line, ' ');
+				$lastSpace  = \strrpos($line, ' ');
+
+				if ($firstSpace === false || $lastSpace === false || $lastSpace <= $firstSpace) {
+					continue;
+				}
+
+				$targetStart = $firstSpace + 1;
+				$target      = \substr($line, $targetStart, $lastSpace - $targetStart);
+				$redacted    = $this->redactQueryValues($target, $sensitiveQueryKeys);
+
+				if ($redacted !== $target) {
+					$lines[$index] = \substr($line, 0, $targetStart) . $redacted . \substr($line, $lastSpace);
+					$changed = true;
+				}
+
+				continue;
+			}
+
+			$colonPos = \strpos($line, ':');
+			if ($colonPos === false || \strcasecmp(\substr($line, 0, $colonPos), 'Referer') !== 0) {
+				continue;
+			}
+
+			$valueStart = $colonPos + 1;
+			while (isset($line[$valueStart]) && ($line[$valueStart] === ' ' || $line[$valueStart] === "\t")) {
+				++$valueStart;
+			}
+
+			$valueEnd = \str_ends_with($line, "\r") ? \strlen($line) - 1 : \strlen($line);
+			$value    = \substr($line, $valueStart, $valueEnd - $valueStart);
+			$redacted = $this->redactQueryValues($value, $sensitiveQueryKeys);
+
+			if ($redacted !== $value) {
+				$lines[$index] = \substr($line, 0, $valueStart) . $redacted . \substr($line, $valueEnd);
+				$changed = true;
+			}
+		}
+
+		return $changed ? \implode("\n", $lines) : $header;
+	}
+
+
+	/**
+	 * Replace exact raw URL occurrences in cURL error text with their redacted forms.
+	 *
+	 * @param  string               $text     cURL error text.
+	 * @param  array<string,mixed>  $request  Normalized request.
+	 * @param  array<string,mixed>  $info     Raw transfer info.
+	 * @return string  Error text safe for logging and exceptions.
+	 */
+	private function redactUrlOccurrences(string $text, array $request, array $info): string {
+		$urls = [$request['url']];
+
+		foreach (['url', 'redirect_url'] as $key) {
+			if (isset($info[$key]) && \is_string($info[$key]) && $info[$key] !== '') {
+				$urls[] = $info[$key];
+			}
+		}
+
+		foreach (\array_unique($urls) as $url) {
+			$redacted = $this->redactQueryValues($url, $request['sensitive_query_keys']);
+			if ($redacted !== $url) {
+				$text = \str_replace($url, $redacted, $text);
+			}
+		}
+
+		return $text;
+	}
+
+
+	/**
 	 * Ensure that a cookie source path is usable when it exists.
 	 *
 	 * Behavior:
@@ -1030,7 +1260,7 @@ final class Curl extends BaseService {
 		return [
 			'request' => [
 				'method' => $request['method'],
-				'url'    => $request['url'],
+				'url'    => $request['_exposed_url'],
 			],
 			'status_code'     => $statusCode,
 			'is_http_success' => ($statusCode >= 200 && $statusCode < 300),
@@ -1038,7 +1268,7 @@ final class Curl extends BaseService {
 			'headers'         => $this->parseHeaderLines($headerLines),
 			'body'            => $body,
 			'body_bytes'      => \strlen($body),
-			'effective_url'   => isset($info['url']) ? (string)$info['url'] : $request['url'],
+			'effective_url'   => isset($info['url']) ? (string)$info['url'] : $request['_exposed_url'],
 			'content_type'    => isset($info['content_type']) && \is_string($info['content_type']) ? $info['content_type'] : null,
 			'info'            => $request['capture_info'] ? $info : [],
 		];
@@ -1120,7 +1350,7 @@ final class Curl extends BaseService {
 
 		$context = $request['log_context'];
 		$context['method']          = $request['method'];
-		$context['url']             = $request['url'];
+		$context['url']             = $request['_exposed_url'];
 		$context['curl_errno']      = $errno;
 		$context['curl_error']      = $error;
 		$context['timeout']         = $request['timeout'];
@@ -1157,7 +1387,7 @@ final class Curl extends BaseService {
 
 		$context = $request['log_context'];
 		$context['method']      = $request['method'];
-		$context['url']         = $request['url'];
+		$context['url']         = $request['_exposed_url'];
 		$context['status_code'] = $statusCode;
 
 		if (isset($info['total_time'])) {
