@@ -26,7 +26,7 @@ use CitOmni\Kernel\Service\BaseService;
  * Wraps MySQLi directly: no ORM, no query builder, no hidden state.
  * The physical connection is deferred until first use. Non-secret configuration
  * is read and validated eagerly in init(); the password is resolved lazily from
- * the Secrets service only when a connection is opened.
+ * the configured Secrets key only when a connection is opened.
  *
  * Behavior:
  * - mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT) is set in init(). This is a
@@ -42,7 +42,8 @@ use CitOmni\Kernel\Service\BaseService;
  * - select() and its dependents require mysqlnd. For mysqlnd-free streaming use selectNoMysqlnd().
  * - insertBatch() owns its own transaction in the chunked fallback. Do not call from within
  *   an active transaction; wrap the outer operation instead.
- * - Database password is read from $app->secrets key `db.password`.
+ * - Database password is read from the $app->secrets key configured by `password_secret`
+ *   (default: `db.password`). The secret value is never retained on the service.
  *
  * Config node: $app->cfg->db
  *   host, user, name                     (required)
@@ -50,6 +51,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   port                                 (optional; default: 3306)
  *   socket                               (optional; default: null)
  *   connect_timeout                      (optional; default: 5)
+ *   password_secret                      (optional; default: db.password)
  *   sql_mode                             (optional; explicit session sql_mode)
  *   timezone                             (optional; explicit session time_zone override;
  *                                         if omitted, UTC offset is derived from PHP's active timezone)
@@ -65,6 +67,7 @@ final class Db extends BaseService {
 	private const DEFAULT_CHARSET         = 'utf8mb4';
 	private const DEFAULT_PORT            = 3306;
 	private const DEFAULT_CONNECT_TIMEOUT = 5;
+	private const DEFAULT_PASSWORD_SECRET = 'db.password';
 	private const DEFAULT_STMT_CACHE      = 128;
 	private const BATCH_ROW_LIMIT         = 1000;
 	private const BATCH_BYTE_LIMIT        = 4 * 1024 * 1024; // 4 MB coarse estimate
@@ -80,6 +83,7 @@ final class Db extends BaseService {
 	private int     $cfgPort    = self::DEFAULT_PORT;
 	private ?string $cfgSocket  = null;
 	private int     $cfgConnectTimeout = self::DEFAULT_CONNECT_TIMEOUT;
+	private string  $cfgPasswordSecret = self::DEFAULT_PASSWORD_SECRET;
 	private ?string $cfgSqlMode = null;
 	private ?string $cfgTimezone = null;
 
@@ -116,7 +120,7 @@ final class Db extends BaseService {
 	 * - Reads non-secret settings from $app->cfg->db and merges with service options (options win on conflict).
 	 * - Validates mandatory non-secret settings and fails fast on missing or invalid values.
 	 * - Rejects the legacy `db.pass` setting so committed credentials cannot be silently ignored.
-	 * - Does not read the database password; it is resolved lazily when a connection is opened.
+	 * - Resolves the password secret key name eagerly, but reads the secret value lazily when a connection is opened.
 	 * - Sets mysqli global reporting mode (MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT).
 	 * - Does NOT open a database connection.
 	 *
@@ -141,7 +145,7 @@ final class Db extends BaseService {
 
 		if (\array_key_exists('pass', $opt)) {
 			throw new DbConnectException(
-				'DB config key "pass" is no longer supported; use secret "db.password".'
+				'DB config key "pass" is no longer supported; use a Secrets key via "password_secret".'
 			);
 		}
 
@@ -189,6 +193,25 @@ final class Db extends BaseService {
 		$this->cfgSocket = ($socket !== null && \trim((string)$socket) !== '')
 			? (string)$socket
 			: null;
+
+		if (\array_key_exists('password_secret', $opt)) {
+			$rawPasswordSecret = $opt['password_secret'];
+			if (!\is_string($rawPasswordSecret)) {
+				throw new DbConnectException(
+					'DB config: "password_secret" must be a non-empty string, got: '
+					. \get_debug_type($rawPasswordSecret) . '.'
+				);
+			}
+
+			$passwordSecret = \trim($rawPasswordSecret);
+			if ($passwordSecret === '') {
+				throw new DbConnectException('DB config: "password_secret" must not be empty.');
+			}
+
+			$this->cfgPasswordSecret = $passwordSecret;
+		} else {
+			$this->cfgPasswordSecret = self::DEFAULT_PASSWORD_SECRET;
+		}
 
 		if (\array_key_exists('connect_timeout', $opt)) {
 			$rawTimeout = $opt['connect_timeout'];
@@ -1265,6 +1288,7 @@ final class Db extends BaseService {
 			'cfgPort' => $this->cfgPort,
 			'cfgSocket' => $this->cfgSocket,
 			'cfgConnectTimeout' => $this->cfgConnectTimeout,
+			'cfgPasswordSecret' => $this->cfgPasswordSecret,
 			'cfgSqlMode' => $this->cfgSqlMode,
 			'cfgTimezone' => $this->cfgTimezone,
 			'hasConnection' => $this->connection instanceof \mysqli,
@@ -1452,16 +1476,20 @@ final class Db extends BaseService {
 
 
 	/**
-	 * Resolve the database password from the application secret store.
+	 * Resolve the database password from the configured application secret key.
 	 *
 	 * @return string Database password, which may be an empty string.
 	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException When the secret is missing or invalid.
 	 */
 	private function databasePassword(): string {
 		try {
-			return $this->app->secrets->get('db.password');
+			return $this->app->secrets->get($this->cfgPasswordSecret);
 		} catch (\RuntimeException $e) {
-			throw new DbConnectException('DB secret "db.password" is missing or invalid.', 0, $e);
+			throw new DbConnectException(
+				'DB secret "' . $this->cfgPasswordSecret . '" is missing or invalid.',
+				0,
+				$e
+			);
 		}
 	}
 
