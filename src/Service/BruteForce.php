@@ -46,6 +46,9 @@ use CitOmni\Kernel\Service\BaseService;
  *   concurrent requests, followed by a normal read/update flow.
  * - Identifiers are normalized (trim + mb_strtolower) and IPs are normalized
  *   (trim + strtolower) before hashing, so callers do not need to normalize.
+ * - The transport sentinels 'unknown' and 'cli' (case-insensitive) are accepted
+ *   as IP input but never form an IP subject, so such calls get identifier-only
+ *   throttling. See status(), record(), and clear().
  *
  * Notes:
  * - Requires citomni/infrastructure (Db service) to be available.
@@ -157,6 +160,9 @@ final class BruteForce extends BaseService {
 	 *
 	 * Behavior:
 	 * - At least one of $identifier or $ip must be non-null and non-empty.
+	 * - An IP equal to a transport sentinel ('unknown' or 'cli', case-insensitive)
+	 *   counts as provided input but yields no IP subject. Without an identifier,
+	 *   the result is "not blocked" with zero attempts and no repository lookup.
 	 * - If $identifier is null, only IP-based throttling is evaluated (and vice versa).
 	 * - A subject is blocked when blocked_until > now, regardless of whether the
 	 *   rolling window has technically expired.
@@ -304,6 +310,9 @@ final class BruteForce extends BaseService {
 	 *
 	 * Behavior:
 	 * - At least one of $identifier or $ip must be non-null and non-empty.
+	 * - An IP equal to a transport sentinel ('unknown' or 'cli', case-insensitive)
+	 *   counts as provided input but yields no IP subject. Without an identifier,
+	 *   the call records nothing.
 	 * - Inputs are normalized before recording (trim + lowercase).
 	 * - If a subject is currently blocked (blocked_until > now), the call is
 	 *   silently ignored for that subject - no counter modification occurs.
@@ -312,8 +321,9 @@ final class BruteForce extends BaseService {
 	 * - If the rolling window is active, the counter is incremented. When the
 	 *   incremented count reaches the configured maximum, blocked_until is set
 	 *   to now + retry_after_seconds.
-	 * - First-ever inserts use ON DUPLICATE KEY UPDATE to handle concurrent
-	 *   requests racing to create the same counter row.
+	 * - First-ever inserts go through BruteForceRepository::insertIfMissing().
+	 *   Duplicate creates from concurrent requests are ignored without error,
+	 *   and an existing row continues through the block/window/update logic.
 	 *
 	 * Typical usage:
 	 *   Called after the protected action has failed.
@@ -381,6 +391,9 @@ final class BruteForce extends BaseService {
 	 * - This service tracks identifier and IP as two independent bucket types.
 	 * - If only $identifier is provided, only the identifier bucket is removed.
 	 * - If only $ip is provided, only the IP bucket is removed.
+	 * - An IP equal to a transport sentinel ('unknown' or 'cli', case-insensitive)
+	 *   counts as provided input but yields no IP subject. Without an identifier,
+	 *   the call deletes nothing.
 	 * - If both are provided, both independent buckets are removed.
 	 * - This is NOT a combined triple-match on (context + identifier + ip), because
 	 *   the underlying data model does not store a separate combined bucket.
@@ -649,6 +662,11 @@ final class BruteForce extends BaseService {
 	 * case folding when mbstring is available. IPs are trimmed and lowercased
 	 * for IPv6 hex consistency, then validated with filter_var.
 	 *
+	 * The transport sentinels 'unknown' and 'cli' are mapped to a null IP subject
+	 * before validation. They still count as provided input, so a call with only
+	 * a sentinel IP returns two null subjects instead of throwing. Only a call
+	 * without any usable input (null/empty identifier and null/empty IP) throws.
+	 *
 	 * @param ?string $identifier Identifier value.
 	 * @param ?string $ip         IP address.
 	 *
@@ -688,7 +706,7 @@ final class BruteForce extends BaseService {
 			throw new \InvalidArgumentException('Invalid IP address: ' . $ipVal);
 		}
 
-		if ($ident === null && $ipVal === null) {
+		if ($ident === null && ($ip === null || $ip === '')) {
 			throw new \InvalidArgumentException('At least one of $identifier or $ip must be non-empty.');
 		}
 
