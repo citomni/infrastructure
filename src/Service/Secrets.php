@@ -12,7 +12,6 @@ declare(strict_types=1);
  * For full copyright, trademark, and license information,
  * please see the LICENSE file distributed with this source code.
  */
-
 namespace CitOmni\Infrastructure\Service;
 
 use CitOmni\Kernel\Service\BaseService;
