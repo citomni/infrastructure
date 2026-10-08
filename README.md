@@ -23,8 +23,6 @@ Ultra-fast PHP 8.2+, side-effect free, designed for **HTTP *and* CLI** runtimes.
 
   * `ext-json` (standard)
   * `ext-iconv` or `ext-mbstring` (mailer UTF-8 normalization; one of them is used)
-  * **`ext-gd`** (required for the optional `/captcha` route)
-  * Freetype (optional) enables TTF text in captcha (falls back to bitmap fonts if missing)
 * OPcache recommended in production
 
 ---
@@ -80,14 +78,14 @@ __construct(\CitOmni\Kernel\App $app, array $options = [])
 
 ```php
 // DB
-$id  = $this->app->db->insert('crm_msg', ['msg_subject' => 'Hi']);
-$row = $this->app->db->fetchRow('SELECT * FROM crm_msg WHERE id=?', [$id]);
+$id  = $this->app->db->insert('orders', ['total' => $total]);
+$row = $this->app->db->fetchRow('SELECT * FROM orders WHERE id=?', [$id]);
 
 // Logging
 $this->app->log->write('orders.jsonl', 'order.create', ['id'=>$id,'total'=>$total]);
 
 // Text (i18n)
-$this->app->txt->get('err_invalid_email', 'contact', 'citomni/infrastructure', 'Invalid.');
+$this->app->txt->get('err_invalid_email', 'contact', 'app', 'Invalid.');
 
 // Mail
 $this->app->mailer
@@ -159,29 +157,6 @@ At runtime the App builds config as:
 		'include_bodies'   => false, // keep false in prod
 	],
 ],
-
-'security' => [
-	'csrf_protection'      => true,
-	'csrf_field_name'      => 'csrf_token',
-	'captcha_protection'   => true,
-	'honeypot_protection'  => true,
-	'form_action_switching'=> true,
-],
-
-'routes' => [
-	'/kontakt.html' => [
-		'controller'     => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
-		'action'         => 'contact',
-		'methods'        => ['GET','POST'],
-		'template_file'  => 'public/contact.html',
-		'template_layer' => 'citomni/infrastructure',
-	],
-	'/captcha' => [
-		'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
-		'action'     => 'captcha',
-		'methods'    => ['GET'],
-	],
-],
 ```
 
 Database and authenticated SMTP passwords are application secrets, not cfg values. Secrets are environment-specific and remain outside version control. `CITOMNI_ENVIRONMENT` selects exactly one runtime file:
@@ -199,8 +174,6 @@ return [
 ];
 ```
 
-> The HTTP router reads **routes as raw arrays** (`$this->app->cfg->routes[...]`).
-
 ---
 
 ## DB service (`db`)
@@ -208,8 +181,8 @@ return [
 Thin wrapper around **LiteMySQLi** with **lazy connection** and ergonomic `__call()` pass-through:
 
 ```php
-$id = $this->app->db->insert('crm_msg', ['msg_subject' => 'Hi']);
-$row = $this->app->db->fetchRow('SELECT * FROM crm_msg WHERE id=?', [$id]);
+$id = $this->app->db->insert('orders', ['total' => $total]);
+$row = $this->app->db->fetchRow('SELECT * FROM orders WHERE id=?', [$id]);
 ```
 
 For models, you can extend `CitOmni\Infrastructure\Model\BaseModelLiteMySQLi` and access `$this->db`.
@@ -270,70 +243,9 @@ $this->app->mailer
 
 ---
 
-## Contact form (optional)
+## Contact form and captcha
 
-If you keep the provided routes:
-
-* `GET|POST /kontakt.html` -> validates, stores in DB (`crm_msg`), emails app recipient
-* `GET /captcha` -> returns a PNG captcha using `ext-gd`
-  Fonts (optional) read from `vendor/citomni/infrastructure/assets/fonts/*.ttf`
-
-**Security interplay**: honors `security.csrf_protection`, `captcha_protection`, and `honeypot_protection`.
-
-**Recipient**: `cfg['identity']['email']` (fallback: `cfg['mail']['from']['email']`).
-
-> If you plan to use the contact form routes, import the schema now (see Database schema below).
-
----
-
-## Database schema
-
-This package ships a ready-to-apply SQL schema for the contact form model:
-
-* File: `vendor/citomni/infrastructure/sql/crm_msg.sql`
-  Creates table **`crm_msg`** (InnoDB, `utf8mb4_unicode_ci`, PK `id` auto-increment). Works on MySQL 8+ / MariaDB 10.4+. 
-
-### Option A — Manual import (recommended)
-
-Use your preferred tool:
-
-**MySQL CLI**
-
-```bash
-mysql -u <user> -p <database> < vendor/citomni/infrastructure/sql/crm_msg.sql
-```
-
-**phpMyAdmin / Adminer**
-
-* Open your database
-* Import the file: `vendor/citomni/infrastructure/sql/crm_msg.sql`
-
-### Option B — Code-based, one-off installer (idempotent)
-
-If you prefer to install via code, run once during setup/deploy:
-
-```php
-<?php
-declare(strict_types=1);
-
-require __DIR__ . '/vendor/autoload.php';
-
-define('CITOMNI_ENVIRONMENT', 'dev'); // Use dev, stage, or prod for the target environment.
-define('CITOMNI_APP_PATH', __DIR__);
-
-$app = new \CitOmni\Kernel\App(__DIR__ . '/config', \CitOmni\Kernel\Mode::CLI);
-$sql = (string)\file_get_contents(__DIR__ . '/vendor/citomni/infrastructure/sql/crm_msg.sql');
-$app->db->execute($sql);
-echo "crm_msg installed.\n";
-```
-
-> Keep this script out of web-root; run it once, then delete it.
-> The `Db` service must have `CREATE` privileges, otherwise use Option A.
-
-### Notes
-
-* The `CrmMessageModel` expects the table name **`crm_msg`** and the columns defined in the SQL file. 
-* You can add indexes later to fit your reporting needs (e.g., `msg_added_dt`, `msg_from_email`).
+Earlier versions shipped a `/captcha` route with its controller, a disabled contact page with its templates and language file, and the `crm_msg` schema for it. The package no longer contributes routes, controllers, or templates. Captchas now come from the `captcha` service and the opt-in `CaptchaController` in [citomni/http](https://github.com/citomni/http), which draw the image with the `captchaImage` service from [citomni/image](https://github.com/citomni/image). A contact page and its table belong to the host app.
 
 ---
 
@@ -351,7 +263,7 @@ CitOmni packages are **side-effect free** by design. Vendor code should not crea
 
 **What to do instead**
 
-* Use the provided SQL once (see **Database schema** above), or
+* Apply the SQL files shipped in `sql/` once (for example `sql/citomni_bruteforce.sql` for the `bruteForce` service), or
 * Maintain **app-owned migrations** (idempotent SQL, `IF NOT EXISTS`, transactional where possible), executed by your deploy pipeline or a CLI command in your app.
 * Track schema with a simple `schema_version` table (or your existing migration tool).
 

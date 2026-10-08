@@ -26,8 +26,6 @@ declare(strict_types=1);
  *   "instanceof Cfg", so the FQCN must be the kernel's.
  * - CitOmni\Kernel\Service\BaseService keeps the app and options, then calls init().
  * - CitOmni\Kernel\Repository\BaseRepository keeps the app, then calls init().
- * - CitOmni\Kernel\Controller\BaseController keeps the app and route config, then
- *   calls init().
  * - CitOmni\Infrastructure\Tests\Support\App holds cfg and the services a suite
  *   registers. Like the kernel App it resolves services through __get(), throws on
  *   unknown ids and returns CITOMNI_APP_PATH from getAppRoot() unless a suite
@@ -97,25 +95,6 @@ namespace CitOmni\Kernel\Repository {
 
 		public function __construct(object $app) {
 			$this->app = $app;
-			if (\method_exists($this, 'init')) {
-				$this->init();
-			}
-		}
-	}
-}
-
-namespace CitOmni\Kernel\Controller {
-
-	/** Base controller double: keeps the app and route config, then calls init() when defined. */
-	abstract class BaseController {
-
-		protected object $app;
-
-		protected array $routeConfig = [];
-
-		public function __construct(object $app, array $routeConfig = []) {
-			$this->app = $app;
-			$this->routeConfig = $routeConfig;
 			if (\method_exists($this, 'init')) {
 				$this->init();
 			}

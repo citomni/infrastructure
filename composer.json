@@ -1,6 +1,6 @@
 {
 	"name": "citomni/infrastructure",
-	"description": "Lean, cross-mode infrastructure for CitOmni apps: DB, logging, text/i18n, mail, cURL, brute-force protection, and optional contact routes.",
+	"description": "Lean, cross-mode infrastructure for CitOmni apps: DB, logging, text/i18n, mail, cURL, and brute-force protection.",
 	"type": "library",
 	"license": "MIT",
 	"homepage": "https://github.com/citomni/infrastructure",
@@ -16,7 +16,6 @@
 		"php",
 		"php8",
 		"psr-4",
-		"captcha",
 		"deterministic",
 		"green-by-design"
 	],
@@ -41,11 +40,10 @@
 		"phpstan/phpstan": "^1.11"
 	},
 	"suggest": {
-		"ext-gd": "Required for the optional /captcha route (image generation).",
 		"ext-iconv": "Improves UTF-8 normalization in Mailer (fallbacks exist).",
 		"ext-mbstring": "Alternative for UTF-8 normalization in Mailer (fallbacks exist).",
 		"ext-opcache": "Better performance in production.",
-		"citomni/http": "HTTP runtime for provided routes, controllers, request handling, views, and security integration.",
+		"citomni/http": "HTTP runtime for request handling, views, and security integration.",
 		"citomni/cli": "CLI runtime for infrastructure-related commands, maintenance tasks, jobs, and developer tooling.",
 		"citomni/authenticate": "User accounts, login, registration, password lifecycle, MFA, trusted devices, and member profile flows."
 	},

@@ -20,7 +20,9 @@ namespace CitOmni\Infrastructure\Boot;
  * Declares this package's contributions to the host app:
  * - MAP_HTTP / MAP_CLI service bindings
  * - CFG_HTTP / CFG_CLI config overlay
- * - ROUTES_HTTP route definitions
+ *
+ * The package contributes no routes, controllers, or templates; pages that use
+ * its services (a contact form, for example) belong to the host app.
  *
  * The App boot process will merge these into the final runtime.
  */
@@ -225,39 +227,8 @@ final class Registry {
 		],
 
 
-		/*
-		 *------------------------------------------------------------------
-		 * VIEW / CONTENT / TEMPLATE ENGINE 
-		 *------------------------------------------------------------------
-		 */		
-		'view' => [
-			'template_layers' => [
-				'citomni/infrastructure'   => \CITOMNI_APP_PATH . '/vendor/citomni/infrastructure/templates',
-			],
-		],
-
-
 	];
-	
-	
-	public const ROUTES_HTTP = [
-	
-		// '/kontakt.html' => [
-			// 'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
-			// 'action' => 'contact',
-			// 'methods' => ['GET','POST'],
-			// 'template_file' => 'public/contact.html',
-			// 'template_layer' => 'citomni/infrastructure'
-		// ],
-		'/captcha' => [
-			'controller' => \CitOmni\Infrastructure\Controller\InfrastructureController::class,
-			'action' => 'captcha',
-			'methods' => ['GET']
-		],
 
-	];
-	
-	
 
 	// Same defaults for CLI
 	public const MAP_CLI = self::MAP_HTTP;

@@ -19,7 +19,6 @@ use CitOmni\Infrastructure\Boot\Registry;
 use CitOmni\Infrastructure\Exception\CurlExecException;
 use CitOmni\Infrastructure\Tests\Support\App;
 use CitOmni\Infrastructure\Tests\Support\LogRecorder;
-use CitOmni\Kernel\Controller\BaseController;
 use CitOmni\Kernel\Service\BaseService;
 
 use function CitOmni\Infrastructure\Tests\Support\expect;
@@ -32,7 +31,8 @@ use function CitOmni\Infrastructure\Tests\Support\thrown;
 
 /*
  * Standalone suite for the package wiring in Boot\Registry and the content it
- * ships: service map, routes, the cfg baseline, language files and templates.
+ * ships: service map, the cfg baseline and language files. It also pins that
+ * the package contributes no routes, controllers or templates.
  *
  * Every service with package-owned cfg is constructed from Registry::CFG_HTTP on
  * the kernel doubles, without Composer. CITOMNI_APP_PATH points at a temporary
@@ -135,17 +135,13 @@ $checks = [
 		}
 	},
 
-	'every HTTP route names a public action on a package controller' => static function (): void {
-		expect(Registry::ROUTES_HTTP !== [], 'ROUTES_HTTP is empty');
-		foreach (Registry::ROUTES_HTTP as $path => $route) {
-			$class = (string)($route['controller'] ?? '');
-			loadPackageClass($class);
-			expect(\is_subclass_of($class, BaseController::class), "{$path}: {$class} does not extend BaseController");
-			$action = (string)($route['action'] ?? '');
-			expect(\method_exists($class, $action) && (new \ReflectionMethod($class, $action))->isPublic(), "{$path}: {$class}::{$action}() is not a public method");
-			$methods = $route['methods'] ?? [];
-			expect(\is_array($methods) && $methods !== [] && \array_diff($methods, ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']) === [], "{$path}: invalid methods " . \json_encode($methods));
-		}
+	// Pages that use the services (a contact form, a captcha route) belong to
+	// the host app; a provider must not impose them.
+	'the package contributes no routes, controllers or templates' => static function (): void {
+		expect(!\defined(Registry::class . '::ROUTES_HTTP'), 'Registry declares ROUTES_HTTP');
+		expect(!isset(Registry::CFG_HTTP['view']), 'CFG_HTTP registers a template layer');
+		expect((\glob(PACKAGE_ROOT . '/src/Controller/*.php') ?: []) === [], 'src/Controller/ contains controllers');
+		expect((\glob(PACKAGE_ROOT . '/templates/*/*.html') ?: []) === [], 'templates/ contains templates');
 	},
 
 	'log constructs from the shipped cfg baseline, creates var/logs and writes citomni_app.jsonl' => static function (): void {
@@ -211,25 +207,6 @@ $checks = [
 				expect(\is_string($value) && $value !== '', "{$name}: {$key} is not a non-empty string");
 			}
 		}
-	},
-
-	'every $txt() key the templates read from citomni/infrastructure exists in every language' => static function (): void {
-		$languages = \glob(PACKAGE_ROOT . '/language/*', \GLOB_ONLYDIR) ?: [];
-		$found     = 0;
-		foreach (\glob(PACKAGE_ROOT . '/templates/*/*.html') ?: [] as $template) {
-			\preg_match_all('/\$txt\(\s*([\'"])([^\'"]+)\1\s*,\s*([\'"])([^\'"]+)\3\s*,\s*([\'"])citomni\/infrastructure\5/', (string)\file_get_contents($template), $calls, \PREG_SET_ORDER);
-			foreach ($calls as $call) {
-				[$key, $file] = [$call[2], $call[4]];
-				$found++;
-				foreach ($languages as $languageDir) {
-					$path = $languageDir . '/' . $file . '.php';
-					expect(\is_file($path), \basename($template) . ": language/" . \basename($languageDir) . "/{$file}.php is missing");
-					$data = require $path;
-					expect(\is_string($data[$key] ?? null), \basename($template) . ": {$key} is missing from language/" . \basename($languageDir) . "/{$file}.php");
-				}
-			}
-		}
-		expect($found > 0, 'no $txt() calls found in templates/; the pattern is stale');
 	},
 
 ];

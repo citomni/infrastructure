@@ -22,7 +22,7 @@ The real service runs on the kernel doubles in `tests/support/doubles.php`, with
 
 Files that a check rewrites are written through `writePhpFile()`, which also drops any OPcache copy, so the checks hold with `opcache.enable_cli` on.
 
-The package's own language files and the template keys are checked in `tests/registry`.
+The package's own language files are checked in `tests/registry`.
 
 ## Checks
 

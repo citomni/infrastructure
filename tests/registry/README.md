@@ -1,6 +1,6 @@
 # Registry suite
 
-Standalone checks for the package wiring in `\CitOmni\Infrastructure\Boot\Registry` and the content it ships: service map, routes, the cfg baseline, language files and templates. No database, no Composer autoloader, and no setup per session.
+Standalone checks for the package wiring in `\CitOmni\Infrastructure\Boot\Registry` and the content it ships: service map, the cfg baseline and language files. It also pins that the package contributes no routes, controllers or templates. No database, no Composer autoloader, and no setup per session.
 
 ## Run
 
@@ -11,7 +11,7 @@ php tests/registry/run.php
 Expected result:
 
 ```
-13 passed, 0 failed
+12 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -33,7 +33,7 @@ All checks pin existing behavior.
 |---|---|
 | CLI gets the same service map and cfg baseline as HTTP | `MAP_CLI`, `CFG_CLI` |
 | every service id maps to a BaseService subclass under src/ | `MAP_HTTP` |
-| every HTTP route names a public action on a package controller | `ROUTES_HTTP` |
+| the package contributes no routes, controllers or templates | no `ROUTES_HTTP`, no `view` cfg, no files in `src/Controller/` or `templates/` |
 | log constructs from the shipped cfg baseline, creates var/logs and writes citomni_app.jsonl | `log` baseline |
 | secrets constructs from the shipped cfg baseline without reading a file | `secrets` |
 | curl accepts the shipped cfg baseline as request defaults | `curl` baseline, validated per request; the request uses an unsupported scheme, so libcurl fails before any IO |
@@ -43,6 +43,5 @@ All checks pin existing behavior.
 | formatNumber constructs from the shipped cfg baseline | `formatNumber` |
 | txt constructs from the shipped cfg baseline plus locale.language | `txt` |
 | shipped language files return flat maps of non-empty strings | `language/*/*.php` |
-| every $txt() key the templates read from citomni/infrastructure exists in every language | `templates/*/*.html` against `language/*/` |
 
 `php tests/run.php` runs every suite in the package.
