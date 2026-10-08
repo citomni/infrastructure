@@ -384,14 +384,16 @@ $checks = [
 
 	// Regression: a rotation took the first free name for its own process id, so
 	// rotations of different processes in one second were not numbered in order.
+	// Rotations of other seconds do not count.
 	'a rotation is numbered past the rotations of other processes in the same second' => static function (): void {
 		$dir = freshDir();
 		$log = logService(['path' => $dir, 'max_bytes' => 1024, 'max_files' => null]);
+		seedFiles($dir, ['app_20200101_000000_999999_9.jsonl'], \time() - 3600);
 		waitForNextSecond();
 		$timestamp = \gmdate('Ymd_His');
 		seedFiles($dir, ["app_{$timestamp}_999999_5.jsonl"], \time());
 		$log->write('app', 'cat', 'record', ['pad' => \str_repeat('x', 1100)]);
-		$expected = ["app_{$timestamp}_999999_5.jsonl", "app_{$timestamp}_" . \getmypid() . '_6.jsonl'];
+		$expected = ['app_20200101_000000_999999_9.jsonl', "app_{$timestamp}_999999_5.jsonl", "app_{$timestamp}_" . \getmypid() . '_6.jsonl'];
 		\sort($expected);
 		same($expected, rotated($dir), 'rotated files');
 	},
@@ -430,6 +432,25 @@ $checks = [
 		}
 		same([], \array_values(\array_diff($others, files($dir))), 'other files deleted');
 		same(['record 3'], rotatedMessages($dir), 'app records kept');
+	},
+
+	// Regression: the directory was listed with glob(), which reads "[1]" in the
+	// path as a character class, so pruning in logs[1] saw the files of logs1.
+	'pruning works in a directory with glob characters in its path' => static function (): void {
+		$base = freshDir();
+		$dir = $base . '/logs[1]';
+		$sibling = $base . '/logs1';
+		\mkdir($dir);
+		\mkdir($sibling);
+		$others = ['app_20200101_000000_7.jsonl', 'app_20200101_000001_7.jsonl'];
+		seedFiles($sibling, $others, \time() - 3600);
+		$log = logService(['path' => $dir, 'max_bytes' => 1024, 'max_files' => 1]);
+		$pad = \str_repeat('x', 1100);
+		for ($i = 1; $i <= 3; $i++) {
+			$log->write('app', 'cat', "record {$i}", ['pad' => $pad]);
+		}
+		same($others, rotated($sibling), 'files in logs1');
+		same(['record 3'], rotatedMessages($dir), 'records kept in logs[1]');
 	},
 
 	'max_files null keeps every rotated file' => static function (): void {

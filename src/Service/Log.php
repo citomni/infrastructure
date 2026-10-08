@@ -416,6 +416,7 @@ final class Log extends BaseService {
 	 * Notes:
 	 * - The name uses UTC (gmdate()), so processes with different time zones number and
 	 *   order their rotations alike.
+	 * - The directory is listed with scandir(), so its path is used literally.
 	 *
 	 * @param string $filePath Active log file path.
 	 * @return void
@@ -434,8 +435,8 @@ final class Log extends BaseService {
 		$prefix = $dir . \DIRECTORY_SEPARATOR . $filename . '_' . $timestamp . '_';
 
 		$sequence = 0;
-		foreach (\glob($prefix . '*.jsonl', \GLOB_NOSORT) ?: [] as $existing) {
-			$key = $this->rotatedFileKey(\basename($existing), $filename);
+		foreach (@\scandir($dir, \SCANDIR_SORT_NONE) ?: [] as $name) {
+			$key = $this->rotatedFileKey($name, $filename);
 			if ($key !== null && $key[0] === $timestamp && $key[1] >= $sequence) {
 				$sequence = $key[1] + 1;
 			}
@@ -471,6 +472,8 @@ final class Log extends BaseService {
 	 * - Modification times have a resolution of one second, so the name only orders the rotations
 	 *   within one second. Names in another time zone, such as the local-time names of earlier
 	 *   versions, therefore cannot reorder files from different seconds.
+	 * - The directory is listed with scandir() and filtered by name, so its path is used literally;
+	 *   glob() would read "[", "*" and "?" in the path as a pattern and could match another directory.
 	 *
 	 * @param string $filePath Active log file path used as the rotation family anchor.
 	 * @return void
@@ -484,16 +487,16 @@ final class Log extends BaseService {
 		$dir = $info['dirname'] ?? '.';
 		$filename = $info['filename'] ?? 'log';
 
-		$paths = \glob($dir . \DIRECTORY_SEPARATOR . $filename . '_*.jsonl', \GLOB_NOSORT);
-		if ($paths === false) {
+		$names = @\scandir($dir, \SCANDIR_SORT_NONE);
+		if ($names === false) {
 			return;
 		}
 
 		$keys = [];
-		foreach ($paths as $path) {
-			$key = $this->rotatedFileKey(\basename($path), $filename);
+		foreach ($names as $name) {
+			$key = $this->rotatedFileKey($name, $filename);
 			if ($key !== null) {
-				$keys[$path] = $key;
+				$keys[$dir . \DIRECTORY_SEPARATOR . $name] = $key;
 			}
 		}
 
@@ -525,6 +528,11 @@ final class Log extends BaseService {
 	 * @return array{0: string, 1: int}|null The timestamp ("Ymd_His") and sequence number, or null when $name is not a rotated file of $filename.
 	 */
 	private function rotatedFileKey(string $name, string $filename): ?array {
+		// Cheap prefix test first; the directory listing holds every file in the directory.
+		if (!\str_starts_with($name, $filename . '_')) {
+			return null;
+		}
+
 		if (\preg_match('/^' . \preg_quote($filename, '/') . '_(\d{8}_\d{6})_\d+(?:_(\d+))?\.jsonl$/D', $name, $match) !== 1) {
 			return null;
 		}

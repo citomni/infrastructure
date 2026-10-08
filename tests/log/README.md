@@ -11,7 +11,7 @@ php tests/log/run.php
 Expected result:
 
 ```
-19 passed, 0 failed, 1 skipped
+20 passed, 0 failed, 1 skipped
 ```
 
 The skipped check starts several writer processes at once. It runs only when `CITOMNI_TEST_PARALLEL` is `1`:
@@ -29,7 +29,7 @@ php tests/log/run.php
 Expected result with the multi-process check:
 
 ```
-20 passed, 0 failed
+21 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -65,10 +65,11 @@ The checks marked as regressions failed before the fix they cover; all other che
 | rotation prunes the oldest rotated files down to max_files | Pruning |
 | rotations within one second prune the oldest files and keep the newest | Regression: a rotation reused a name that pruning had just freed, and pruning then deleted the newest file |
 | rotations from processes in different time zones keep the newest files | Regression: names in local time, so a process in another time zone numbered from 0 again and reused freed names |
-| a rotation is numbered past the rotations of other processes in the same second | Regression: a rotation took the first free name for its own process id |
+| a rotation is numbered past the rotations of other processes in the same second | Regression: a rotation took the first free name for its own process id. Rotations of other seconds do not count |
 | pruning orders equal modification times by the timestamp and sequence number in the name | Regression: plain name order, which also put `_10` before `_2` |
 | pruning orders by modification time before the name | Names that disagree with the rotation order, e.g. local time across the end of daylight saving time |
 | pruning deletes only rotated files of the log file being written | Regression: pruning `app` deleted `app_failed.jsonl` and other files matching `app_*.jsonl` |
+| pruning works in a directory with glob characters in its path | Regression: `glob()` read `[1]` in `logs[1]` as a character class, so pruning there deleted files in `logs1` and never its own |
 | max_files null keeps every rotated file | No pruning |
 | concurrent writers lose no records across rotations | With `CITOMNI_TEST_PARALLEL=1` only: 4 processes write 150 records each to one file with `max_bytes` 4096 and no pruning. Every record must appear exactly once across the live and rotated files. |
 
