@@ -318,6 +318,7 @@ final class ValueToSql extends BaseService {
 	 * - If cfg decimal_separator=',' and thousand_separator='.':
 	 *   - "1.234,5"  -> "1234.50" (scale=2)
 	 *   - ",5"       -> "0.50"    (scale=2)
+	 *   - "12,00"    -> throws    (scale=0; zeros count as fraction digits)
 	 *   - "1234.5"   -> throws ('.' is not the cfg decimal separator)
 	 * - If cfg decimal_separator='.' and thousand_separator=',':
 	 *   - "1,234.5"  -> "1234.50" (scale=2)
@@ -450,13 +451,8 @@ final class ValueToSql extends BaseService {
 			return $sign . $intPart . '.' . $fracPart;
 		}
 
-		// scale=0 -> integer-like decimal
-		if ($fracPart !== '') {
-			// Allow "0", "00", "000" etc. when scale is 0 (no fractional value).
-			if (\trim($fracPart, '0') !== '') {
-				throw new ValueToSqlException('Fraction not allowed when scale is 0.','err_value_to_sql_decimal_scale_zero_has_fraction');
-			}
-		}
+		// scale=0 -> integer-like decimal. Any fraction digit, also the zeros in "12,00",
+		// was rejected above as too_many_decimals.
 		if ($sign === '-' && $intPart === '0') {
 			$sign = '';
 		}

@@ -449,6 +449,10 @@ class Mailer extends BaseService {
 	/**
 	 * Set the plain-text alternative body.
 	 *
+	 * Notes:
+	 * - Template vars are not injected here; body($text, false) injects them into a plain-text body.
+	 * - Without a body, send() sends this text as a text/plain message.
+	 *
 	 * @param string $altBody Text-only alternative content.
 	 * @return self           Fluent self.
 	 */
@@ -557,7 +561,7 @@ class Mailer extends BaseService {
 	 * Send the prepared email with structured logging and no output.
 	 *
 	 * Behavior:
-	 * - Normalize bodies: If only AltBody is set, force text mode; if HTML body lacks AltBody, auto-generate it.
+	 * - Normalize bodies: If only AltBody is set, send it as the plain-text body; if HTML body lacks AltBody, auto-generate it.
 	 * - Capture optional SMTP transcript in memory (no echo) per mail.logging.debug_transcript and max_lines.
 	 * - Resolve `mail.smtp.password` lazily from Secrets immediately before authenticated SMTP send.
 	 * - Attempt transport send via PHPMailer::send() and measure duration.
@@ -583,7 +587,7 @@ class Mailer extends BaseService {
 	 *   // Happy path: HTML body; AltBody auto-generated
 	 *   $ok = $this->app->mailer->to('u@x.tld')->subject('Hi')->body('<b>Hello</b>', true)->send();
 	 *
-	 *   // Edge case: Only AltBody set; forces text mode
+	 *   // Edge case: Only AltBody set; sent as a text/plain message
 	 *   $ok = $this->app->mailer->to('u@x.tld')->altBody('Plain only')->send();
 	 *
 	 * Failure:
@@ -596,9 +600,12 @@ class Mailer extends BaseService {
 	 */
 	public function send(): bool {
 		
-		// Normalize bodies
+		// Normalize bodies. PHPMailer refuses an empty Body, so a text-only message
+		// sends its AltBody as the plain-text Body.
 		if ($this->mailer->Body === '' && $this->mailer->AltBody !== '') {
 			$this->mailer->isHTML(false);
+			$this->mailer->Body = $this->mailer->AltBody;
+			$this->mailer->AltBody = '';
 		}
 		if ($this->isHtmlMode() && $this->mailer->AltBody === '') {
 			$this->mailer->AltBody = $this->htmlToPlain($this->mailer->Body);

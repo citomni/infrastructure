@@ -407,6 +407,16 @@ final class Log extends BaseService {
 	/**
 	 * Rotates the active log file while the caller holds the lock.
 	 *
+	 * Behavior:
+	 * - Renames the active file to "<name>_<Ymd>_<His>_<pid>.jsonl", with the current time in UTC
+	 * - A later rotation within the same second gets "_<n>" appended, numbered past every
+	 *   rotated file of that second from any process, so a name freed by pruning is never
+	 *   reused and the numbers follow the order of the rotations
+	 *
+	 * Notes:
+	 * - The name uses UTC (gmdate()), so processes with different time zones number and
+	 *   order their rotations alike.
+	 *
 	 * @param string $filePath Active log file path.
 	 * @return void
 	 * @throws LogRotationException When rename fails.
@@ -420,13 +430,20 @@ final class Log extends BaseService {
 		$dir = $info['dirname'] ?? '.';
 		$filename = $info['filename'] ?? 'log';
 		$pid = \getmypid() ?: 0;
-		$timestamp = \date('Ymd_His');
+		$timestamp = \gmdate('Ymd_His');
+		$prefix = $dir . \DIRECTORY_SEPARATOR . $filename . '_' . $timestamp . '_';
 
-		$counter = 0;
+		$sequence = 0;
+		foreach (\glob($prefix . '*.jsonl', \GLOB_NOSORT) ?: [] as $existing) {
+			$key = $this->rotatedFileKey(\basename($existing), $filename);
+			if ($key !== null && $key[0] === $timestamp && $key[1] >= $sequence) {
+				$sequence = $key[1] + 1;
+			}
+		}
+
 		do {
-			$suffix = $counter === 0 ? '' : '_' . $counter;
-			$rotatedPath = $dir . \DIRECTORY_SEPARATOR . $filename . '_' . $timestamp . '_' . $pid . $suffix . '.jsonl';
-			$counter++;
+			$rotatedPath = $prefix . $pid . ($sequence === 0 ? '' : '_' . $sequence) . '.jsonl';
+			$sequence++;
 		} while (\file_exists($rotatedPath));
 
 		if (!@\rename($filePath, $rotatedPath)) {
@@ -441,8 +458,19 @@ final class Log extends BaseService {
 	 * Prunes old rotated files while the caller holds the lock.
 	 *
 	 * Behavior:
+	 * - Considers only files named like rotations of this log file ("<name>_<Ymd>_<His>_<pid>[_<n>].jsonl");
+	 *   other logs whose names start with "<name>_" are left alone, unless their own name has that form
+	 * - Deletes the oldest rotated files until max_files remain, ordered by:
+	 *   1) modification time
+	 *   2) the timestamp in the name
+	 *   3) the sequence number in the name, compared as a number
 	 * - Non-fatal by design
 	 * - Only housekeeping failures are softened in this service
+	 *
+	 * Notes:
+	 * - Modification times have a resolution of one second, so the name only orders the rotations
+	 *   within one second. Names in another time zone, such as the local-time names of earlier
+	 *   versions, therefore cannot reorder files from different seconds.
 	 *
 	 * @param string $filePath Active log file path used as the rotation family anchor.
 	 * @return void
@@ -456,39 +484,52 @@ final class Log extends BaseService {
 		$dir = $info['dirname'] ?? '.';
 		$filename = $info['filename'] ?? 'log';
 
-		$files = \glob($dir . \DIRECTORY_SEPARATOR . $filename . '_*.jsonl', \GLOB_NOSORT);
-		if ($files === false) {
+		$paths = \glob($dir . \DIRECTORY_SEPARATOR . $filename . '_*.jsonl', \GLOB_NOSORT);
+		if ($paths === false) {
 			return;
 		}
 
-		$count = \count($files);
-		if ($count <= $this->maxRotatedFiles) {
+		$keys = [];
+		foreach ($paths as $path) {
+			$key = $this->rotatedFileKey(\basename($path), $filename);
+			if ($key !== null) {
+				$keys[$path] = $key;
+			}
+		}
+
+		$deleteCount = \count($keys) - $this->maxRotatedFiles;
+		if ($deleteCount <= 0) {
 			return;
 		}
 
-		\usort($files, static function(string $a, string $b): int {
-			$timeA = \filemtime($a);
-			$timeB = \filemtime($b);
+		$files = [];
+		foreach ($keys as $path => [$timestamp, $sequence]) {
+			// A file that vanished in the meantime sorts first; unlink() then does nothing.
+			$files[] = [@\filemtime($path) ?: 0, $timestamp, $sequence, $path];
+		}
 
-			if ($timeA === $timeB) {
-				return $a <=> $b;
-			}
+		// Arrays compare element by element: modification time, timestamp, sequence, path.
+		\sort($files);
 
-			if ($timeA === false) {
-				return -1;
-			}
-
-			if ($timeB === false) {
-				return 1;
-			}
-
-			return $timeA <=> $timeB;
-		});
-
-		$deleteCount = $count - $this->maxRotatedFiles;
 		for ($i = 0; $i < $deleteCount; $i++) {
-			@\unlink($files[$i]);
+			@\unlink($files[$i][3]);
 		}
+	}
+
+
+	/**
+	 * Parses the name of a rotated file.
+	 *
+	 * @param string $name File name to parse, e.g. "app_20260101_120000_4242_3.jsonl".
+	 * @param string $filename Log file name without extension, e.g. "app".
+	 * @return array{0: string, 1: int}|null The timestamp ("Ymd_His") and sequence number, or null when $name is not a rotated file of $filename.
+	 */
+	private function rotatedFileKey(string $name, string $filename): ?array {
+		if (\preg_match('/^' . \preg_quote($filename, '/') . '_(\d{8}_\d{6})_\d+(?:_(\d+))?\.jsonl$/D', $name, $match) !== 1) {
+			return null;
+		}
+
+		return [$match[1], (int)($match[2] ?? 0)];
 	}
 
 

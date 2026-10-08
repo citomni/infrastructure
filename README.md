@@ -390,6 +390,20 @@ This keeps the infrastructure package **stateless**, while your application cont
 
 ---
 
+## Testing
+
+The suites are plain PHP scripts without a test framework or Composer bootstrap. Run every suite from a source checkout with:
+
+```bash
+php tests/run.php
+```
+
+Each suite also runs alone, for example `php tests/log/run.php` (isolated, with doubles) or `php tests/db/database.php` (real MySQL/MariaDB). The database suites connect as `root` to `127.0.0.1:3306`, read the password from `CITOMNI_TEST_PASSWORD` (unset means no password), and create and drop their own randomly named database. Set `CITOMNI_TEST_PARALLEL=1` to include the multi-process checks; without it they are reported as skipped. The mailer suite loads PHPMailer from `vendor/`, so run `composer install` once first. Each suite's README lists its commands and expected totals.
+
+The tests are excluded from Composer archives and `git archive` exports.
+
+---
+
 ## Coding & Documentation Conventions
 
 All CitOmni projects follow the shared conventions documented here:  

@@ -55,15 +55,36 @@ final class ValueFromSqlException extends \InvalidArgumentException {
 		return $this->messageParams;
 	}
 
+	/**
+	 * Return a copy of this exception that names the field it belongs to.
+	 *
+	 * Behavior:
+	 * - Trims $field; an empty result returns this exception unchanged.
+	 * - PHP exceptions cannot be cloned, so the copy is a new exception with the same
+	 *   message, message key, params and code, and this exception as previous.
+	 * - The copy's file and line are set to the call of withField(), matching its trace;
+	 *   the original throw site stays available through getPrevious().
+	 *
+	 * Typical usage:
+	 *   throw $e->withField('price');
+	 *
+	 * @param  string  $field  Field name, e.g. a form input name.
+	 * @return self  The copy, or this exception when $field is empty after trimming.
+	 */
 	public function withField(string $field): self {
 		$field = \trim($field);
 		if ($field === '') {
 			return $this;
 		}
 
-		$clone = clone $this;
-		$clone->field = $field;
-		return $clone;
+		$copy = new self($this->getMessage(), $this->messageKey, $this->messageParams, $field, $this->getCode(), $this);
+
+		// PHP sets file and line where the exception is created, i.e. inside this method.
+		$caller = $copy->getTrace()[0] ?? [];
+		$copy->file = $caller['file'] ?? $copy->file;
+		$copy->line = $caller['line'] ?? $copy->line;
+
+		return $copy;
 	}
 
 }
