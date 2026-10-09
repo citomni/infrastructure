@@ -704,7 +704,7 @@ $this->app->txt->get($key, $file, $layer = 'app', $default = '', $vars = []);
 - Missing files, missing/empty keys, and unusable values fall back to `$default` and are logged.
 - There is no automatic language fallback chain.
 
-**Current logging detail**: `Txt` currently writes diagnostics through the `log` service to `txt.jsonl`. The registry still exposes older `txt.log.file` and `txt.log.path` defaults, but the current `Txt` implementation does **not** use those settings to select its log destination. Log placement follows the `log` service's directory.
+**Logging**: `Txt` writes its diagnostics through the `log` service to `txt.jsonl`, in the `log` service's directory. The file name is fixed, and `Txt` reads no cfg besides `locale.language`.
 
 Translation values are plain strings, not pre-escaped HTML. Escape them appropriately when inserting them into HTML, attributes, JavaScript, or another output context.
 
@@ -1003,11 +1003,11 @@ No plaintext database password key belongs in this node.
 | `max_bytes` | `2_000_000` |
 | `max_files` | `10` (or `null` for unlimited) |
 
-### Language — `locale.language` and `txt`
+### Language — `locale.language`
 
-The application must supply `locale.language` for the `txt` service. The package does not prescribe an application language.
+The application must supply `locale.language` for the `txt` service, normally in its common cfg `config/citomni_cfg.php`, where the citomni/kernel scaffold declares it. The package does not prescribe an application language.
 
-Although the registry includes `txt.log.file = 'litetxt_errors.jsonl'` and `txt.log.path`, current missing-text diagnostics are written to `txt.jsonl` through the `log` service instead. Do not configure the legacy keys expecting them to relocate those messages.
+`Txt` has no cfg node of its own; its diagnostics always go to `txt.jsonl` through the `log` service. The LiteTxt-era keys `txt.log.file` and `txt.log.path` are no longer part of the baseline and have no effect, so a `txt.log` node left in application config can be deleted.
 
 ### Values — `locale.format`
 
@@ -1172,7 +1172,7 @@ This package is intentionally smaller than an all-purpose infrastructure framewo
 - Buffered MySQLi reads depend on `mysqlnd`; the streaming alternative has reference/lifetime constraints.
 - Nested database transactions are not supported.
 - `Txt` has no automatic language fallback chain and no HTML escaping.
-- The current `Txt` diagnostic file is fixed to `txt.jsonl` despite legacy registry settings.
+- The `Txt` diagnostic file name is fixed to `txt.jsonl`.
 - `Curl` has no automatic JSON body handling, retries, or SSRF protection for user-supplied URLs.
 - `Mailer` templates use simple token replacement, not the CitOmni TemplateEngine.
 - `BruteForce` requires a separately installed table and application-owned maintenance scheduling.
