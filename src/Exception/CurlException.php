@@ -23,7 +23,7 @@ namespace CitOmni\Infrastructure\Exception;
  * - Provides lightweight accessors for method, URL, and transfer info.
  *
  * Notes:
- * - This is the common parent for configuration, execution, and response parsing failures.
+ * - This is the common parent for configuration and execution failures.
  * - Query values marked sensitive by Curl are redacted from URL-bearing exception context.
  *
  * @throws void
