@@ -195,6 +195,20 @@ $checks = [
 		same('1,01', service(['decimal_string_rounding' => 'half_up'])->decimal('1.005'), 'rounding from cfg');
 	},
 
+	// Regression: "fail" also failed on zeros beyond the scale, e.g. "1.500" at
+	// scale 2, while scale 0 already dropped them. Zeros carry no value.
+	'decimal() drops zeros beyond the scale before rounding, so fail only fails on digits that carry a value' => static function (): void {
+		$v = service();
+		maps(static fn($x) => $v->decimal($x), [['1.500', '1,50'], ['1.5000000', '1,50'], ['1234.5600', '1.234,56'], ['-0.000', '0,00']], 'zeros beyond scale 2');
+		maps(static fn($x) => $v->decimal($x, scale: 0), [['12.000', '12'], ['-0.00', '0']], 'zeros beyond scale 0');
+		foreach ([['1.505', 2], ['1.5001', 2], ['12.050', 0]] as [$input, $scale]) {
+			$e = thrown(ValueFromSqlException::class, static fn() => $v->decimal($input, scale: $scale), export($input) . " at scale {$scale}");
+			same(['err_value_from_sql_decimal_too_many_decimals', ['scale' => $scale]], [$e->getMessageKey(), $e->getMessageParams()], 'key and params for ' . export($input));
+		}
+		// Only trailing zeros go; half_up still rounds on the first digit beyond the scale.
+		same(['1,23', '1,24'], [$v->decimal('1.2305', rounding: 'half_up'), $v->decimal('1.2350', rounding: 'half_up')], 'half_up after dropping zeros');
+	},
+
 	'decimal() with trim_trailing_zeros drops zeros and then the separator' => static function (): void {
 		$v = service(['decimal_trim_trailing_zeros' => true]);
 		maps(static fn($x) => $v->decimal($x), [['1234.50', '1.234,5'], ['1234.00', '1.234'], ['0.10', '0,1'], ['-0.00', '0']], 'trim');

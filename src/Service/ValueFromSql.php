@@ -254,6 +254,8 @@ final class ValueFromSql extends BaseService {
 	 * Decimal policy is cfg-driven and strict:
 	 * - scale default: cfg locale.format.decimal_scale
 	 * - rounding mode: cfg locale.format.decimal_string_rounding ("fail"|"truncate"|"half_up")
+	 *   zeros beyond the scale are dropped first, so "fail" only fails when a digit other than zero
+	 *   would be lost (e.g. "1.500" -> "1,50" at scale 2, while "1.505" fails).
 	 * - trim zeros: cfg locale.format.decimal_trim_trailing_zeros
 	 *   when enabled, output may drop trailing zeros and may remove the decimal separator entirely
 	 *   (e.g. "1.234,50" -> "1.234,5" and "1.234,00" -> "1.234").
@@ -790,6 +792,12 @@ final class ValueFromSql extends BaseService {
 	/**
 	 * Apply scale and rounding policy to parsed decimal parts.
 	 *
+	 * Behavior:
+	 * - Zeros beyond the scale are dropped first; they carry no value.
+	 * - Remaining digits beyond the scale follow the rounding mode: "fail" throws, "truncate"
+	 *   cuts them off, "half_up" rounds on the first of them.
+	 * - A shorter fraction is padded with zeros, and negative zero becomes zero.
+	 *
 	 * @param string $sign '' or '-'.
 	 * @param string $intDigits Digits-only integer part (>=1 char).
 	 * @param string $fracDigits Digits-only fraction part (may be '').
@@ -801,9 +809,14 @@ final class ValueFromSql extends BaseService {
 	 */
 	private function applyScalePolicy(string $sign, string $intDigits, string $fracDigits, int $scale, string $rounding): array {
 
+		// Drop zeros beyond the scale, so "fail" only fails when a digit other than zero would be lost.
+		if (\strlen($fracDigits) > $scale) {
+			$fracDigits = \substr($fracDigits, 0, $scale) . \rtrim(\substr($fracDigits, $scale), '0');
+		}
+
 		if ($scale === 0) {
-			// Any fraction must be handled by rounding policy.
-			if ($fracDigits === '' || \trim($fracDigits, '0') === '') {
+			// Any remaining fraction must be handled by rounding policy.
+			if ($fracDigits === '') {
 				return [$intDigits, '', ($intDigits === '0') ? '' : $sign];
 			}
 

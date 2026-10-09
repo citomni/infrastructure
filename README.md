@@ -515,7 +515,7 @@ With the default locale, the important results are `'1.200'`, `'1.234,50'`, `tru
 
 `dateTimeLocal()` changes **format**, not time zone. It does not convert UTC timestamps to the application's local time zone. SQL `DATETIME` values have no zone metadata; any required conversion belongs in the calling application.
 
-For `valueFromSql->decimal()`, the default policy for SQL decimal **strings** is to fail rather than silently round when reducing precision. Explicit alternatives are `truncate` and `half_up`. These choices are defined under `locale.format`.
+For `valueFromSql->decimal()`, the default policy for SQL decimal **strings** is to fail rather than silently round when reducing precision. Zeros beyond the scale carry no value and are dropped first, so with scale 2 `"1.500"` becomes `"1,50"`, while `"1.505"` fails. Explicit alternatives are `truncate` and `half_up`. These choices are defined under `locale.format`.
 
 ### Validation errors and fields
 

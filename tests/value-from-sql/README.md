@@ -11,7 +11,7 @@ php tests/value-from-sql/run.php
 Expected result:
 
 ```
-16 passed, 0 failed
+17 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -24,7 +24,7 @@ The checks are tables of inputs with their expected output, or with the `ValueFr
 
 ## Checks
 
-The check marked as a regression failed before the fix it covers; all other checks pin existing behavior.
+The checks marked as regressions failed before the fixes they cover; all other checks pin existing behavior.
 
 | Check | Covers |
 |---|---|
@@ -34,6 +34,7 @@ The check marked as a regression failed before the fix it covers; all other chec
 | null and empty input is null unless required | All eight methods; the `*_required` keys |
 | decimal() formats SQL dot-decimals with the locale separators and pads to scale | Output form, scale 0, a dot-decimal locale |
 | decimal() applies the rounding modes fail, truncate and half_up to string input | String-based rounding with carry, negative zero, rounding from cfg |
+| decimal() drops zeros beyond the scale before rounding, so fail only fails on digits that carry a value | Regression: `fail` also failed on zeros beyond the scale, e.g. `1.500` at scale 2, while scale 0 already dropped them |
 | decimal() with trim_trailing_zeros drops zeros and then the separator | Trimming |
 | decimal() rejects locale formats, scientific notation and non-finite floats | Error keys, invalid overrides |
 | decimal() rounds float input half-up to scale regardless of the rounding mode | Float input |
