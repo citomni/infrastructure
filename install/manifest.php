@@ -36,4 +36,10 @@ return [
 			'policy' => 'create-only',
 		],
 	],
+	'gitignore' => [
+		'/var/logs/*',
+		'/var/secrets/*',
+		'!/var/logs/.gitkeep',
+		'!/var/secrets/.gitkeep',
+	],
 ];

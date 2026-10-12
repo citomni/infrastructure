@@ -656,7 +656,7 @@ if ($this->app->secrets->has('external_api.optional_token')) {
 - There is **no fallback** from production to staging or development secrets.
 - A newly started App instance sees rotated secrets; a previously loaded instance keeps its values.
 
-The package contains `install/manifest.php`, which describes create-only scaffolding for the three files. This manifest is **not** a promise that a bare `composer require` has generated or populated them.
+The package contains `install/manifest.php`, which describes create-only scaffolding for the three files. This manifest is **not** a promise that a bare `composer require` has generated or populated them. The manifest also declares the contents of `var/secrets/` and `var/logs/` for the `.gitignore` block that `citomni/installer` maintains, so the secret files and log files stay out of Git while each directory's `.gitkeep` stays versioned.
 
 For normal deployments, provision the correct file, restrict its filesystem permissions, and verify that the active environment is the one intended. Database and SMTP credentials are consumed by their services only when needed.
 
@@ -1251,7 +1251,7 @@ src/
     └── ValueToSql.php
 
 install/
-└── manifest.php                  # Secret-file scaffolding metadata
+└── manifest.php                  # Secret-file scaffolding and runtime .gitignore rules
 sql/
 └── citomni_bruteforce.sql        # Schema dump; review before importing
 language/
