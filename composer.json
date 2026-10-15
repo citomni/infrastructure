@@ -23,7 +23,7 @@
 		"php": "^8.5",
 		"ext-curl": "*",
 		"ext-mysqli": "*",
-		"citomni/kernel": "^1.0",
+		"citomni/kernel": "^1.0.2.7",
 		"phpmailer/phpmailer": "^6.9"
 	},
 	"autoload": {
