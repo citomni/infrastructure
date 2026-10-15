@@ -115,11 +115,12 @@ $checks = [
 
 	'init requires locale.format with one decimal separator and a different or empty thousand separator' => static function (): void {
 		$valid = ['decimal_separator' => ',', 'thousand_separator' => '.'];
-		thrown(ValueConfigurationException::class, static fn() => new ValueToSql(new App([])), 'no locale');
-		thrown(ValueConfigurationException::class, static fn() => new ValueToSql(new App(['locale' => ['language' => 'da']])), 'no locale.format');
+		// A missing node or key means a broken package baseline, which Cfg reports itself.
+		thrown(\OutOfBoundsException::class, static fn() => new ValueToSql(new App([])), 'no locale');
+		thrown(\OutOfBoundsException::class, static fn() => new ValueToSql(new App(['locale' => ['language' => 'da']])), 'no locale.format');
+		thrown(\OutOfBoundsException::class, static fn() => serviceWithFormat(['thousand_separator' => '.']), 'no decimal_separator');
+		thrown(\OutOfBoundsException::class, static fn() => serviceWithFormat(['decimal_separator' => ',']), 'no thousand_separator');
 		foreach ([
-			'no decimal_separator'          => ['thousand_separator' => '.'],
-			'no thousand_separator'         => ['decimal_separator' => ','],
 			'empty decimal_separator'       => ['decimal_separator' => ''] + $valid,
 			'two-char decimal_separator'    => ['decimal_separator' => ',,'] + $valid,
 			'two-char thousand_separator'   => ['thousand_separator' => '..'] + $valid,

@@ -28,7 +28,7 @@ The check marked as a regression failed before the fix it covers; all other chec
 
 | Check | Covers |
 |---|---|
-| init requires locale.format with one decimal separator and a different or empty thousand separator | `ValueConfigurationException` |
+| init requires locale.format with one decimal separator and a different or empty thousand separator | `OutOfBoundsException` from Cfg for a missing node or key, `ValueConfigurationException` for an invalid value |
 | integer() accepts an optional sign and strict thousand grouping | Grouping, signs, leading zeros, the 64-bit limits |
 | integer() rejects decimals, wrong grouping, other characters and non-string types | `err_value_to_sql_integer_invalid`; space and disabled grouping |
 | integer() enforces min, max, allowNegative and the 64-bit range | Range errors and their params, reversed bounds |

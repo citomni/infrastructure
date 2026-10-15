@@ -64,7 +64,7 @@ All checks pin existing behavior.
 | IPv6 addresses are lower-cased before hashing | IPv6 normalization |
 | the transport sentinels "unknown" and "cli" give no IP subject | Sentinels in `status()`, `record()` and `clear()` |
 | invalid input is rejected before any lookup | Context, subjects, IP validation, unconfigured contexts |
-| contexts are validated on first use and the config node is required | `BruteForceConfigException` |
+| contexts are validated on first use and the config node is required | `BruteForceConfigException`; `OutOfBoundsException` from Cfg without the node |
 | a blocked subject is not counted further | No writes while blocked |
 | an expired window is ignored by status() and restarted by the next failure | Rolling window |
 | an active block outlives its window, and an expired block allows a fresh window | Block versus window |

@@ -51,7 +51,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - BIGINT integers may arrive as strings; integer formatting works on digits as strings to avoid overflow.
  *
  * @throws ValueFromSqlException On invalid SQL values.
- * @throws ValueConfigurationException On missing or invalid locale configuration.
+ * @throws ValueConfigurationException On invalid locale configuration.
  * @throws ValueDefinitionException On invalid method arguments or unsupported formatting rules.
  */
 final class ValueFromSql extends BaseService {
@@ -72,22 +72,10 @@ final class ValueFromSql extends BaseService {
 	private bool $dateTimeLocalIncludeSeconds = false;
 
 	protected function init(): void {
-
-		// Require locale.format to exist (use isset() to avoid triggering Cfg::__get()).
-		if (!isset($this->app->cfg->locale) || !isset($this->app->cfg->locale->format)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format is required by ValueFromSql.');
-		}
-
+		// Package-owned cfg: Assumes the Registry baseline for locale.format, so no isset() guard.
 		$format = $this->app->cfg->locale->format;
 
 		// Required: Separators.
-		if (!isset($format->decimal_separator)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_separator is required by ValueFromSql.');
-		}
-		if (!isset($format->thousand_separator)) {
-			throw new ValueConfigurationException("Missing cfg: locale.format.thousand_separator is required by ValueFromSql (use '' to disable).");
-		}
-
 		$dec = (string)$format->decimal_separator;
 		$tho = (string)$format->thousand_separator;
 
@@ -102,25 +90,12 @@ final class ValueFromSql extends BaseService {
 		}
 
 		// Required: Grouping.
-		if (!isset($format->group_thousands)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.group_thousands is required by ValueFromSql.');
-		}
 		$group = $format->group_thousands;
 		if (!\is_bool($group)) {
 			throw new ValueConfigurationException('Invalid cfg: locale.format.group_thousands must be boolean.');
 		}
 
 		// Required: Decimal policy.
-		if (!isset($format->decimal_scale)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_scale is required by ValueFromSql.');
-		}
-		if (!isset($format->decimal_string_rounding)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_string_rounding is required by ValueFromSql.');
-		}
-		if (!isset($format->decimal_trim_trailing_zeros)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_trim_trailing_zeros is required by ValueFromSql.');
-		}
-
 		$scale = $format->decimal_scale;
 		if (!\is_int($scale) || $scale < 0 || $scale > 18) {
 			throw new ValueConfigurationException('Invalid cfg: locale.format.decimal_scale must be int in range 0..18.');
@@ -137,13 +112,6 @@ final class ValueFromSql extends BaseService {
 		}
 
 		// Required: HTML time/datetime-local policy.
-		if (!isset($format->time_include_seconds)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.time_include_seconds is required by ValueFromSql.');
-		}
-		if (!isset($format->datetime_local_include_seconds)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.datetime_local_include_seconds is required by ValueFromSql.');
-		}
-
 		$timeSec = $format->time_include_seconds;
 		if (!\is_bool($timeSec)) {
 			throw new ValueConfigurationException('Invalid cfg: locale.format.time_include_seconds must be boolean.');

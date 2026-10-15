@@ -81,7 +81,7 @@ use CitOmni\Kernel\Service\BaseService;
  *       ],
  *   ]
  *
- * @throws BruteForceConfigException When the bruteforce config node is missing or invalid.
+ * @throws BruteForceConfigException When the bruteforce config node is empty or a context is missing or invalid.
  * @throws \InvalidArgumentException On invalid input (empty context, no subjects, etc.).
  */
 final class BruteForce extends BaseService {
@@ -101,19 +101,13 @@ final class BruteForce extends BaseService {
 	 * node as a plain array and instantiates the repository.
 	 *
 	 * Behavior:
-	 * - Fails fast if the `security.bruteforce` config node is missing or empty.
+	 * - Fails fast if the `security.bruteforce` config node is empty.
 	 * - Per-context validation is deferred to first access (resolveContext).
 	 *
 	 * @return void
 	 */
 	protected function init(): void {
-		if (!isset($this->app->cfg->security) || !isset($this->app->cfg->security->bruteforce)) {
-			throw new BruteForceConfigException(
-				'Missing required config node: security.bruteforce. '
-				. 'Define at least one context (for example "default") under security.bruteforce.'
-			);
-		}
-
+		// Package-owned cfg: Assumes the Registry baseline for security.bruteforce, so no isset() guard.
 		$this->contexts = $this->app->cfg->security->bruteforce->toArray();
 
 		if ($this->contexts === []) {

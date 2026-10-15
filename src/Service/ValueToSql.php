@@ -68,7 +68,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   $date  = $this->app->valueToSql->date($post['moved_in']); // "2026-02-26" or null
  *
  * @throws ValueToSqlException On invalid user input values.
- * @throws ValueConfigurationException On missing or invalid locale configuration.
+ * @throws ValueConfigurationException On invalid locale configuration.
  * @throws ValueDefinitionException On invalid normalization rule definitions or caller arguments.
  */
 final class ValueToSql extends BaseService {
@@ -77,21 +77,8 @@ final class ValueToSql extends BaseService {
 	private string $thousandSeparator = '.';
 
 	protected function init(): void {
-		
-		// Require locale.format to exist (use isset() to avoid triggering Cfg::__get()).
-		if (!isset($this->app->cfg->locale) || !isset($this->app->cfg->locale->format)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format is required by ValueToSql.');
-		}
-
+		// Package-owned cfg: Assumes the Registry baseline for locale.format, so no isset() guard.
 		$format = $this->app->cfg->locale->format;
-
-		// Both keys must be set explicitly. No defaults: the caller owns locale policy.
-		if (!isset($format->decimal_separator)) {
-			throw new ValueConfigurationException('Missing cfg: locale.format.decimal_separator is required by ValueToSql.');
-		}
-		if (!isset($format->thousand_separator)) {
-			throw new ValueConfigurationException("Missing cfg: locale.format.thousand_separator is required by ValueToSql (use '' to disable grouping).");
-		}
 
 		$dec = (string)$format->decimal_separator;
 		$tho = (string)$format->thousand_separator;

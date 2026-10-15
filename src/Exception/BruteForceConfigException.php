@@ -18,7 +18,7 @@ namespace CitOmni\Infrastructure\Exception;
 /**
  * BruteForceConfigException: Thrown when brute force configuration is missing or invalid.
  *
- * Covers: missing bruteforce config node, missing context key, invalid threshold
+ * Covers: empty bruteforce config node, missing context key, invalid threshold
  * values (non-positive limits, zero interval, etc.).
  *
  * Notes:

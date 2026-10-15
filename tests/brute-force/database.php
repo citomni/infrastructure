@@ -315,7 +315,7 @@ $checks = [
 			thrown(BruteForceConfigException::class, static fn() => $bf->status($context, 'user@example.com'), "context {$context}");
 		}
 		same(false, $bf->status('ok', 'user@example.com')['blocked'], 'valid context next to broken ones');
-		thrown(BruteForceConfigException::class, static fn() => new BruteForce(new App(['security' => []])), 'no security.bruteforce');
+		thrown(\OutOfBoundsException::class, static fn() => new BruteForce(new App(['security' => []])), 'no security.bruteforce');
 		thrown(BruteForceConfigException::class, static fn() => new BruteForce(new App(['security' => ['bruteforce' => []]])), 'empty security.bruteforce');
 	},
 

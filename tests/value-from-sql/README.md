@@ -28,7 +28,7 @@ The checks marked as regressions failed before the fixes they cover; all other c
 
 | Check | Covers |
 |---|---|
-| init requires every locale.format policy key with a valid value | Each of the eight keys missing, and invalid values for each |
+| init requires every locale.format policy key with a valid value | Each of the eight keys missing (`OutOfBoundsException` from Cfg), and invalid values for each (`ValueConfigurationException`) |
 | integer() groups digits as text, strips leading zeros and normalizes -0 | BIGINT beyond 64 bits, grouping overrides and separators |
 | integer() rejects separators, decimals and non-integer types | Error keys |
 | null and empty input is null unless required | All eight methods; the `*_required` keys |

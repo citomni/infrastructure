@@ -110,11 +110,12 @@ $checks = [
 
 	'init requires every locale.format policy key with a valid value' => static function (): void {
 		$baseline = Registry::CFG_COMMON['locale']['format'];
-		thrown(ValueConfigurationException::class, static fn() => new ValueFromSql(new App([])), 'no locale');
+		// A missing node or key means a broken package baseline, which Cfg reports itself.
+		thrown(\OutOfBoundsException::class, static fn() => new ValueFromSql(new App([])), 'no locale');
 		foreach (\array_keys($baseline) as $key) {
 			$format = $baseline;
 			unset($format[$key]);
-			thrown(ValueConfigurationException::class, static fn() => new ValueFromSql(new App(['locale' => ['format' => $format]])), "without {$key}");
+			thrown(\OutOfBoundsException::class, static fn() => new ValueFromSql(new App(['locale' => ['format' => $format]])), "without {$key}");
 		}
 		$invalid = [
 			'decimal_separator'              => ['', ',,'],
