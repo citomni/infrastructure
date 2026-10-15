@@ -31,11 +31,6 @@
 			"CitOmni\\Infrastructure\\": "src/"
 		}
 	},
-	"autoload-dev": {
-		"psr-4": {
-			"CitOmni\\Infrastructure\\Tests\\": "tests/"
-		}
-	},
 	"require-dev": {
 		"phpstan/phpstan": "^1.11"
 	},
