@@ -15,8 +15,11 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Tests\Log;
 
+use CitOmni\Infrastructure\Boot\Registry;
 use CitOmni\Infrastructure\Service\Log;
 use CitOmni\Infrastructure\Tests\Support\App;
+
+use function CitOmni\Infrastructure\Tests\Support\mergeLastWins;
 
 /*
  * Worker for the multi-process check in run.php. Not a suite of its own.
@@ -54,8 +57,9 @@ require __DIR__ . '/../../src/Exception/LogFileException.php';
 require __DIR__ . '/../../src/Exception/LogRotationException.php';
 require __DIR__ . '/../../src/Exception/LogWriteException.php';
 require __DIR__ . '/../../src/Service/Log.php';
+require __DIR__ . '/../../src/Boot/Registry.php';
 
-$log = new Log(new App(['log' => ['path' => $logDir, 'max_bytes' => 4096, 'max_files' => null]]));
+$log = new Log(new App(['log' => mergeLastWins(Registry::CFG_COMMON['log'], ['path' => $logDir, 'max_bytes' => 4096, 'max_files' => null])]));
 
 \touch($ready);
 

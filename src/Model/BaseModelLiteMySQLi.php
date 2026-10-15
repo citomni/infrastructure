@@ -36,7 +36,7 @@ use LiteMySQLi\LiteMySQLi;
  * - db.host (string, required) - Database host.
  * - db.user (string, required) - Username.
  * - db.name (string, required) - Schema/database name.
- * - db.charset (string, default: "utf8mb4") - Connection charset.
+ * - db.charset (string, required) - Connection charset.
  * Secrets:
  * - db.password (string, required) - Database password.
  *
@@ -118,7 +118,6 @@ abstract class BaseModelLiteMySQLi {
 	 *
 	 * Notes:
 	 * - No retries or reconnect logic here; deterministic and cheap by design.
-	 * - Charset defaults to "utf8mb4" if not specified in cfg.
 	 *
 	 * Typical usage:
 	 *   Use in hot paths to capture a local `$conn` for repeated operations.
@@ -155,7 +154,7 @@ abstract class BaseModelLiteMySQLi {
 			(string)$cfg->user,
 			$this->app->secrets->get('db.password'),
 			(string)$cfg->name,
-			$cfg->charset ?? 'utf8mb4'
+			(string)$cfg->charset
 		);
 
 		return $this->conn;

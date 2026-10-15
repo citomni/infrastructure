@@ -34,27 +34,27 @@ use PHPMailer\PHPMailer\PHPMailer;
  * - Writes: $this->app->log (mail_log.jsonl, mailer_errors.jsonl).
  * - Optional: $this->app->request (IP detection in HTTP; falls back safely in CLI).
  *
- * Configuration keys:
- * - mail.format (string) - Default "html" or "text". Default: "html".
- * - mail.transport (string) - "smtp"|"sendmail"|"qmail"|"mail". Default: "mail".
- * - mail.from.email (string) - Sender address. Default: "" (unset).
- * - mail.from.name (string) - Sender display name. Default: "".
- * - mail.reply_to.email (string) - Reply-To address. Default: "" (unset).
- * - mail.reply_to.name (string) - Reply-To name. Default: "".
- * - mail.sendmail_path (string) - Path for sendmail/qmail. Default: "/usr/sbin/sendmail" or "/var/qmail/bin/sendmail".
- * - mail.smtp.host (string) - SMTP host(s), ";" separated allowed. Default: "".
- * - mail.smtp.port (int) - SMTP port. Default: 587.
- * - mail.smtp.encryption (string) - "tls"|"ssl"|"" (none). Default: "".
- * - mail.smtp.auth (bool) - Enable SMTP auth. Default: true.
- * - mail.smtp.username (string) - SMTP username. Default: "".
+ * Configuration keys (read directly; a missing key throws \OutOfBoundsException):
+ * - mail.format (string) - Default "html" or "text".
+ * - mail.transport (string) - "smtp"|"sendmail"|"qmail"|"mail".
+ * - mail.from.email (string) - Sender address; "" for none.
+ * - mail.from.name (string) - Sender display name.
+ * - mail.reply_to.email (string) - Reply-To address; "" for none.
+ * - mail.reply_to.name (string) - Reply-To name.
+ * - mail.sendmail_path (string) - Path for sendmail/qmail; "" uses "/usr/sbin/sendmail" or "/var/qmail/bin/sendmail".
+ * - mail.smtp.host (string) - SMTP host(s), ";" separated allowed.
+ * - mail.smtp.port (int) - SMTP port.
+ * - mail.smtp.encryption (string|null) - "tls"|"ssl"; null or "" for none.
+ * - mail.smtp.auth (bool) - Enable SMTP auth.
+ * - mail.smtp.username (string) - SMTP username.
  * - Secret `mail.smtp.password` (string) - Required when SMTP auth is enabled; may be empty.
- * - mail.smtp.auto_tls (bool) - Opportunistic STARTTLS. Default: true.
- * - mail.smtp.timeout (int) - Seconds before SMTP timeout. Default: 15.
- * - mail.smtp.keepalive (bool) - Keep the SMTP connection alive. Default: false.
- * - mail.logging.log_success (bool) - Dev-only success logs. Default: false.
- * - mail.logging.debug_transcript (bool) - Capture limited SMTP transcript. Default: false.
- * - mail.logging.max_lines (int) - Max transcript lines. Default: 200.
- * - mail.logging.include_bodies (bool) - Include message bodies in logs (prod caution). Default: false.
+ * - mail.smtp.auto_tls (bool) - Opportunistic STARTTLS.
+ * - mail.smtp.timeout (int) - Seconds before SMTP timeout.
+ * - mail.smtp.keepalive (bool) - Keep the SMTP connection alive.
+ * - mail.logging.log_success (bool) - Dev-only success logs.
+ * - mail.logging.debug_transcript (bool) - Capture limited SMTP transcript.
+ * - mail.logging.max_lines (int) - Max transcript lines.
+ * - mail.logging.include_bodies (bool) - Include message bodies in logs (prod caution).
  *
  * Error handling:
  * - Fail-fast on invalid inputs (e.g., unreadable attachment/template): throws \InvalidArgumentException.
@@ -136,7 +136,7 @@ class Mailer extends BaseService {
 		$this->applyMessageDefaultsFromCfg();
 
 		// Enable success logging from config (DEV can set to true)
-		$logSuccess = (bool)($this->app->cfg->mail->logging->log_success ?? false);
+		$logSuccess = (bool)$this->app->cfg->mail->logging->log_success;
 		if ($logSuccess) {
 			$this->logEmails(true);
 		}
@@ -167,22 +167,22 @@ class Mailer extends BaseService {
 	 * @return void
 	 */
 	protected function applyMessageDefaultsFromCfg(): void {
-		$mail = $this->app->cfg->mail ?? null;
+		$mail = $this->app->cfg->mail;
 
-		$fromEmail = $mail->from->email ?? '';
-		$fromName  = $mail->from->name  ?? '';
+		$fromEmail = (string)$mail->from->email;
+		$fromName  = (string)$mail->from->name;
 		if ($fromEmail !== '') {
 			$this->mailer->setFrom($fromEmail, $fromName);
 		}
 
-		$rtEmail = $mail->reply_to->email ?? '';
-		$rtName  = $mail->reply_to->name  ?? '';
+		$rtEmail = (string)$mail->reply_to->email;
+		$rtName  = (string)$mail->reply_to->name;
 		if ($rtEmail !== '') {
 			$this->mailer->clearReplyTos();
 			$this->mailer->addReplyTo($rtEmail, $rtName);
 		}
 
-		$format = \strtolower((string)($mail->format ?? 'html'));
+		$format = \strtolower((string)$mail->format);
 		$this->defaultHtml = ($format === 'html');
 	}
 
@@ -194,6 +194,7 @@ class Mailer extends BaseService {
 	 * - Read mail.transport and switch PHPMailer mode: smtp | sendmail | qmail | mail.
 	 * - For SMTP: Set Host, Port, SMTPSecure from encryption (tls|ssl|none), SMTPAuth, and Username.
 	 * - Reject the legacy mail.smtp.password cfg key instead of silently leaving credentials in config.
+	 * - Require booleans for mail.smtp.auth and mail.smtp.auto_tls, so null cannot switch either off.
 	 * - SMTP password is deliberately not loaded here; send() resolves it lazily from Secrets.
 	 * - For SMTP: Apply operational tuning (SMTPAutoTLS, Timeout, SMTPKeepAlive).
 	 * - For sendmail/qmail: Set Sendmail binary path.
@@ -203,49 +204,41 @@ class Mailer extends BaseService {
 	 * - Idempotent: Safe to call multiple times (used by refreshConfig()).
 	 * - Encryption policy: Unknown/empty encryption results in no implicit TLS/SSL.
 	 * - No I/O is performed; this only sets PHPMailer properties.
-	 * - Uses cfg defaults when fields are missing; does not validate credentials or reachability.
+	 * - Reads every key directly; a missing key throws \OutOfBoundsException. Does not validate
+	 *   credentials or reachability.
 	 *
 	 * Typical usage:
 	 *   Refresh PHPMailer after config changes or during service init().
 	 *
-	 * Examples:
-	 *
-	 *   // SMTP with STARTTLS on port 587
-	 *   $this->app->cfg->mail->transport = 'smtp';
-	 *   $this->app->cfg->mail->smtp = (object)['host'=>'smtp.example.com','port'=>587,'encryption'=>'tls'];
-	 *   $this->applyTransportFromCfg();
-	 *
-	 *   // Switch to system sendmail
-	 *   $this->app->cfg->mail->transport = 'sendmail';
-	 *   $this->app->cfg->mail->sendmail_path = '/usr/sbin/sendmail';
-	 *   $this->applyTransportFromCfg();
-	 *
 	 * Failure:
 	 * - Throws when the legacy mail.smtp.password cfg key is still present.
+	 * - Throws when mail.smtp.auth or mail.smtp.auto_tls is not a boolean.
 	 *
 	 * @return void
-	 * @throws \UnexpectedValueException When mail.smtp.password is still configured in cfg.
+	 * @throws \UnexpectedValueException When mail.smtp.password is still configured in cfg, or
+	 *                                    mail.smtp.auth or mail.smtp.auto_tls is not a boolean.
 	 */
 	protected function applyTransportFromCfg(): void {
-		$mail = $this->app->cfg->mail ?? null;
-		$transport = \strtolower((string)($mail->transport ?? 'mail'));
+		$mail = $this->app->cfg->mail;
+		$transport = \strtolower((string)$mail->transport);
 		switch ($transport) {
 			case 'smtp':
 				$this->mailer->isSMTP();
 				
-				$smtp = $mail->smtp ?? null;
-				if (isset($smtp->password)) {
+				$smtp = $mail->smtp;
+				// A removed key, so its presence is checked on the array, not read.
+				if (\array_key_exists('password', $smtp->toArray())) {
 					throw new \UnexpectedValueException(
 						'Mailer config key "mail.smtp.password" is no longer supported; use secret "mail.smtp.password".'
 					);
 				}
 				
 				// Host can be a semicolon-separated list; PHPMailer supports this natively.
-				$this->mailer->Host = (string)($smtp->host ?? '');
-				$this->mailer->Port = (int)($smtp->port ?? 587);
+				$this->mailer->Host = (string)$smtp->host;
+				$this->mailer->Port = (int)$smtp->port;
 				
 				// Encryption
-				$enc = \strtolower((string)($smtp->encryption ?? ''));
+				$enc = \strtolower((string)$smtp->encryption);
 				if ($enc === 'tls') {
 					$this->mailer->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
 				} elseif ($enc === 'ssl') {
@@ -256,18 +249,18 @@ class Mailer extends BaseService {
 				}
 				
 				// Auth
-				$this->mailer->SMTPAuth = (bool)($smtp->auth ?? true);
+				$this->mailer->SMTPAuth = self::flag($smtp->auth, 'mail.smtp.auth');
 				if ($this->mailer->SMTPAuth) {
-					$this->mailer->Username = (string)($smtp->username ?? '');
+					$this->mailer->Username = (string)$smtp->username;
 				} else {
 					$this->mailer->Username = '';
 				}
 				$this->mailer->Password = '';
 				
 				// Operational tuning
-				$this->mailer->SMTPAutoTLS = (bool)($smtp->auto_tls ?? true);
-				$this->mailer->Timeout     = (int)($smtp->timeout  ?? 15);
-				$this->mailer->SMTPKeepAlive = (bool)($smtp->keepalive ?? false);
+				$this->mailer->SMTPAutoTLS = self::flag($smtp->auto_tls, 'mail.smtp.auto_tls');
+				$this->mailer->Timeout     = (int)$smtp->timeout;
+				$this->mailer->SMTPKeepAlive = (bool)$smtp->keepalive;
 				
 				// Debugging
 				// Never echo from transport setup; debug is handled safely in send()
@@ -277,12 +270,14 @@ class Mailer extends BaseService {
 				
 			case 'sendmail':
 				$this->mailer->isSendmail();
-				// PHPMailer uses the same property for sendmail/qmail path
-				$this->mailer->Sendmail = (string)($mail->sendmail_path ?? '/usr/sbin/sendmail');
+				// PHPMailer uses the same property for sendmail/qmail path; '' means the transport's standard binary
+				$path = (string)$mail->sendmail_path;
+				$this->mailer->Sendmail = $path !== '' ? $path : '/usr/sbin/sendmail';
 				break;
 			case 'qmail':
 				$this->mailer->isQmail();
-				$this->mailer->Sendmail = (string)($mail->sendmail_path ?? '/var/qmail/bin/sendmail');
+				$path = (string)$mail->sendmail_path;
+				$this->mailer->Sendmail = $path !== '' ? $path : '/var/qmail/bin/sendmail';
 				break;
 			case 'mail':
 			default:
@@ -290,6 +285,22 @@ class Mailer extends BaseService {
 				$this->mailer->isMail();
 				break;
 		}
+	}
+
+
+	/**
+	 * Return a mail cfg flag, or throw when it is not a boolean.
+	 *
+	 * @param  mixed   $value  The cfg value.
+	 * @param  string  $path   Dotted cfg path, for the message.
+	 * @return bool
+	 * @throws \UnexpectedValueException  When the value is not a boolean.
+	 */
+	private static function flag(mixed $value, string $path): bool {
+		if (!\is_bool($value)) {
+			throw new \UnexpectedValueException("Mailer config {$path} must be a boolean.");
+		}
+		return $value;
 	}
 
 
@@ -614,10 +625,10 @@ class Mailer extends BaseService {
 		$envIsDev = \defined('CITOMNI_ENVIRONMENT') && \CITOMNI_ENVIRONMENT === 'dev';
 
 		// Logging/debug policy from cfg
-		$logCfg          = $this->app->cfg->mail->logging ?? null;
-		$debugTranscript = (bool)($logCfg->debug_transcript ?? false);
-		$debugMaxLines   = (int)($logCfg->max_lines ?? 200);
-		$includeBodies   = (bool)($logCfg->include_bodies ?? false);
+		$logCfg          = $this->app->cfg->mail->logging;
+		$debugTranscript = (bool)$logCfg->debug_transcript;
+		$debugMaxLines   = (int)$logCfg->max_lines;
+		$includeBodies   = (bool)$logCfg->include_bodies;
 
 		$smtpDebug = [];
 		$startedAt = \microtime(true);

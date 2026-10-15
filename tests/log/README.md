@@ -11,7 +11,7 @@ php tests/log/run.php
 Expected result:
 
 ```
-20 passed, 0 failed, 1 skipped
+21 passed, 0 failed, 1 skipped
 ```
 
 The skipped check starts several writer processes at once. It runs only when `CITOMNI_TEST_PARALLEL` is `1`:
@@ -29,7 +29,7 @@ php tests/log/run.php
 Expected result with the multi-process check:
 
 ```
-21 passed, 0 failed
+22 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -52,7 +52,8 @@ The checks marked as regressions failed before the fix they cover; all other che
 | Check | Covers |
 |---|---|
 | init creates the configured directory and default_file becomes a .jsonl file | `log.path`, `log.default_file`, the sidecar `.lock` file |
-| without a log cfg node the logger writes citomni_app.jsonl under CITOMNI_APP_PATH/var/logs | Defaults |
+| the shipped baseline writes citomni_app.jsonl under CITOMNI_APP_PATH/var/logs | `log` baseline |
+| a missing log node or key fails at init with OutOfBoundsException | Direct reads of the baseline keys |
 | each entry is one JSON line: timestamp, category, message, then context only when non-empty | Line format, key order, `DATE_ATOM` |
 | unicode and slashes are written unescaped, invalid UTF-8 is substituted | JSON flags |
 | objects are encoded as JSON, and entries JSON cannot encode keep timestamp and category | Objects, the bounded normalization fallback, the fallback line |

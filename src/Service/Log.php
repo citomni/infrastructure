@@ -43,7 +43,7 @@ use CitOmni\Kernel\Service\BaseService;
  * - Pruning failures are non-fatal, but lock, open, write, and rotation failures are fatal
  *
  * Notes:
- * - Optional cfg node access uses CitOmni cfg semantics, including $this->app->cfg->log ?? null
+ * - cfg log is read directly; a missing key throws \OutOfBoundsException
  * - This service intentionally avoids direct dependency on the concrete Cfg class
  * - Supported child config values are validated explicitly during init
  * - Grossly invalid log node shape is allowed to fail fast during child access
@@ -58,9 +58,6 @@ use CitOmni\Kernel\Service\BaseService;
  */
 final class Log extends BaseService {
 
-	private const DEFAULT_DIR = CITOMNI_APP_PATH . '/var/logs';
-	private const DEFAULT_FILE = 'citomni_app.jsonl';
-	private const DEFAULT_MAX_FILE_SIZE = 10485760;
 	private const MIN_MAX_FILE_SIZE = 1024;
 	private const MAX_NORMALIZE_DEPTH = 8;
 	private const LINE_FEED = "\n";
@@ -68,8 +65,8 @@ final class Log extends BaseService {
 	private const CONTROL_CHARS_PATTERN = '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/';
 
 	private string $dir = '';
-	private string $defaultFile = self::DEFAULT_FILE;
-	private int $maxFileSize = self::DEFAULT_MAX_FILE_SIZE;
+	private string $defaultFile;
+	private int $maxFileSize;
 	private ?int $maxRotatedFiles = null;
 
 
@@ -77,17 +74,14 @@ final class Log extends BaseService {
 	 * Initializes validated scalar configuration for the logger.
 	 *
 	 * Behavior:
-	 * - Loads cfg->log as an optional top-level node using CitOmni cfg semantics
-	 * - Reads child values once into local variables when the node is present
-	 * - Validates supported child values explicitly
+	 * - Reads path, default_file, max_bytes and max_files from cfg log once
+	 * - Validates every value explicitly
 	 * - Stores the derived scalar runtime state
 	 * - Releases constructor options after initialization
 	 *
 	 * Notes:
-	 * - The optional access pattern $this->app->cfg->log ?? null is intentional
-	 *   and supported by CitOmni's cfg wrapper semantics
+	 * - A missing log node or key throws \OutOfBoundsException
 	 * - This service does not depend on the concrete Cfg class directly
-	 * - Supported child values are validated explicitly
 	 * - Grossly invalid log node shape is allowed to fail fast during child access
 	 *   instead of being rewrapped into a logger-specific exception
 	 *
@@ -96,29 +90,22 @@ final class Log extends BaseService {
 	 * @throws LogDirectoryException When the configured log directory cannot be used.
 	 */
 	protected function init(): void {
-		$logCfg = $this->app->cfg->log ?? null;
+		$logCfg = $this->app->cfg->log;
 
-		$path = null;
-		$defaultFile = null;
-		$maxBytes = null;
-		$maxFiles = null;
+		$path = $logCfg->path;
+		$defaultFile = $logCfg->default_file;
+		$maxBytes = $logCfg->max_bytes;
+		$maxFiles = $logCfg->max_files;
 
-		if ($logCfg !== null) {
-			$path = $logCfg->path ?? null;
-			$defaultFile = $logCfg->default_file ?? null;
-			$maxBytes = $logCfg->max_bytes ?? null;
-			$maxFiles = $logCfg->max_files ?? null;
+		if (!\is_string($path) || $path === '') {
+			throw new LogConfigException('Log configuration "path" must be a non-empty string.');
 		}
 
-		if ($path !== null && (!\is_string($path) || $path === '')) {
-			throw new LogConfigException('Log configuration "path" must be a non-empty string when provided.');
+		if (!\is_string($defaultFile) || $defaultFile === '') {
+			throw new LogConfigException('Log configuration "default_file" must be a non-empty string.');
 		}
 
-		if ($defaultFile !== null && (!\is_string($defaultFile) || $defaultFile === '')) {
-			throw new LogConfigException('Log configuration "default_file" must be a non-empty string when provided.');
-		}
-
-		if ($maxBytes !== null && !\is_int($maxBytes)) {
+		if (!\is_int($maxBytes)) {
 			throw new LogConfigException('Log configuration "max_bytes" must be an integer.');
 		}
 
@@ -126,16 +113,9 @@ final class Log extends BaseService {
 			throw new LogConfigException('Log configuration "max_files" must be an integer or null.');
 		}
 
-		$this->setDir($path ?? self::DEFAULT_DIR, true);
-
-		if ($defaultFile !== null) {
-			$this->defaultFile = $this->normalizeFilename($defaultFile);
-		}
-
-		if ($maxBytes !== null) {
-			$this->setMaxFileSize($maxBytes);
-		}
-
+		$this->setDir($path, true);
+		$this->defaultFile = $this->normalizeFilename($defaultFile);
+		$this->setMaxFileSize($maxBytes);
 		$this->setMaxRotatedFiles($maxFiles);
 
 		$this->options = [];

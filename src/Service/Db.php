@@ -42,20 +42,21 @@ use CitOmni\Kernel\Service\BaseService;
  * - select() and its dependents require mysqlnd. For mysqlnd-free streaming use selectNoMysqlnd().
  * - insertBatch() owns its own transaction in the chunked fallback. Do not call from within
  *   an active transaction; wrap the outer operation instead.
- * - Database password is read from the $app->secrets key configured by `password_secret`
- *   (default: `db.password`). The secret value is never retained on the service.
+ * - Database password is read from the $app->secrets key that `password_secret` names.
+ *   The secret value is never retained on the service.
  *
- * Config node: $app->cfg->db
- *   host, user, name                     (required)
- *   charset                              (optional; default: utf8mb4)
- *   port                                 (optional; default: 3306)
- *   socket                               (optional; default: null)
- *   connect_timeout                      (optional; default: 5)
- *   password_secret                      (optional; default: db.password)
- *   sql_mode                             (optional; explicit session sql_mode)
- *   timezone                             (optional; explicit session time_zone override;
- *                                         if omitted, UTC offset is derived from PHP's active timezone)
- *   statement_cache_limit                (optional; int >= 0, default: 128; 0 disables caching)
+ * Config node: $app->cfg->db; a service option that is not null overrides the key
+ *   host, user, name                     (non-empty strings)
+ *   charset                              (non-empty string)
+ *   port                                 (1-65535)
+ *   socket                               (null or '' for the mysqli default: the default
+ *                                         socket for host localhost, TCP otherwise)
+ *   connect_timeout                      (seconds, >= 1)
+ *   password_secret                      (Secrets key of the password)
+ *   sql_mode                             (explicit session sql_mode; null or '' for none)
+ *   timezone                             (explicit session time_zone; null or '' derives the
+ *                                         UTC offset from PHP's active timezone)
+ *   statement_cache_limit                (int >= 0; 0 disables caching)
  *
  * Typical usage:
  *   $row = $this->app->db->fetchRow('SELECT id, email FROM users WHERE id = ?', [$userId]);
@@ -64,11 +65,6 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws \CitOmni\Infrastructure\Exception\DbQueryException   On query prepare, bind, or execute failures.
  */
 final class Db extends BaseService {
-	private const DEFAULT_CHARSET         = 'utf8mb4';
-	private const DEFAULT_PORT            = 3306;
-	private const DEFAULT_CONNECT_TIMEOUT = 5;
-	private const DEFAULT_PASSWORD_SECRET = 'db.password';
-	private const DEFAULT_STMT_CACHE      = 128;
 	private const BATCH_ROW_LIMIT         = 1000;
 	private const BATCH_BYTE_LIMIT        = 4 * 1024 * 1024; // 4 MB coarse estimate
 	private const BATCH_CHUNK_SIZE        = 1000;
@@ -76,16 +72,16 @@ final class Db extends BaseService {
 	// Connection settings resolved once in init(). Never read from cfg again after that.
 	// The database password is intentionally not retained on this service; it is
 	// resolved from the Secrets service only when opening a connection.
-	private string  $cfgHost    = '';
-	private string  $cfgUser    = '';
-	private string  $cfgName    = '';
-	private string  $cfgCharset = self::DEFAULT_CHARSET;
-	private int     $cfgPort    = self::DEFAULT_PORT;
-	private ?string $cfgSocket  = null;
-	private int     $cfgConnectTimeout = self::DEFAULT_CONNECT_TIMEOUT;
-	private string  $cfgPasswordSecret = self::DEFAULT_PASSWORD_SECRET;
-	private ?string $cfgSqlMode = null;
-	private ?string $cfgTimezone = null;
+	private string  $cfgHost;
+	private string  $cfgUser;
+	private string  $cfgName;
+	private string  $cfgCharset;
+	private int     $cfgPort;
+	private ?string $cfgSocket;
+	private int     $cfgConnectTimeout;
+	private string  $cfgPasswordSecret;
+	private ?string $cfgSqlMode;
+	private ?string $cfgTimezone;
 
 	/** @var ?\mysqli Active connection; null until first use or after close(). */
 	private ?\mysqli $connection = null;
@@ -104,7 +100,7 @@ final class Db extends BaseService {
 	/** @var array<string, \mysqli_stmt> Statement cache, keyed by trimmed SQL string. */
 	private array $statementCache = [];
 
-	private int $statementCacheLimit = self::DEFAULT_STMT_CACHE;
+	private int $statementCacheLimit;
 	private int $queryCount = 0;
 
 
@@ -117,42 +113,32 @@ final class Db extends BaseService {
 	 * Read and validate all database configuration. Called once by BaseService constructor.
 	 *
 	 * Behavior:
-	 * - Reads non-secret settings from $app->cfg->db and merges with service options (options win on conflict).
-	 * - Validates mandatory non-secret settings and fails fast on missing or invalid values.
-	 * - Rejects the legacy `db.pass` setting so committed credentials cannot be silently ignored.
+	 * - Reads non-secret settings from $app->cfg->db; a service option that is not null wins over its key.
+	 * - Validates every setting and fails fast on invalid values; a missing cfg key throws \OutOfBoundsException.
+	 * - Rejects the legacy `pass` setting in cfg or options so committed credentials cannot be silently ignored.
 	 * - Resolves the password secret key name eagerly, but reads the secret value lazily when a connection is opened.
 	 * - Sets mysqli global reporting mode (MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT).
 	 * - Does NOT open a database connection.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On missing or invalid config.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On an empty or invalid value, or the legacy pass key.
+	 * @throws \OutOfBoundsException When the db node, or a key that no option overrides, is missing.
 	 */
 	protected function init(): void {
-		// Merge config node with service options. Options take precedence.
-		// ?? is safe here: Cfg::__isset() is implemented, so a missing "db" key returns null
-		// without throwing. Genuine errors (e.g. toArray() failure) bubble up as intended.
-		$cfg = [];
-		$raw = $this->app->cfg->db ?? null;
-		if ($raw instanceof \CitOmni\Kernel\Cfg) {
-			$cfg = $raw->toArray();
-		} elseif (\is_array($raw)) {
-			$cfg = $raw;
-		}
-
-		// Service options win over config.
-		$opt = $this->options + $cfg;
+		// Service options win over cfg; an option that is null falls back to the cfg key.
+		$cfg = $this->app->cfg->db;
+		$opt = $this->options;
 		$this->options = []; // free; never read again
 
-		if (\array_key_exists('pass', $opt)) {
+		if (\array_key_exists('pass', $opt) || \array_key_exists('pass', $cfg->toArray())) {
 			throw new DbConnectException(
 				'DB config key "pass" is no longer supported; use a Secrets key via "password_secret".'
 			);
 		}
 
-		// Mandatory.
-		$this->cfgHost = \trim((string)($opt['host'] ?? ''));
-		$this->cfgUser = \trim((string)($opt['user'] ?? ''));
-		$this->cfgName = \trim((string)($opt['name'] ?? ''));
+		$this->cfgHost = \trim((string)($opt['host'] ?? $cfg->host));
+		$this->cfgUser = \trim((string)($opt['user'] ?? $cfg->user));
+		$this->cfgName = \trim((string)($opt['name'] ?? $cfg->name));
 
 		if ($this->cfgHost === '') {
 			throw new DbConnectException('DB config: "host" is required.');
@@ -164,108 +150,92 @@ final class Db extends BaseService {
 			throw new DbConnectException('DB config: "name" is required.');
 		}
 
-		// Optional with safe defaults. Omitted keys use defaults; supplied-but-invalid keys throw.
-		$charset = \trim((string)($opt['charset'] ?? ''));
-		$this->cfgCharset = ($charset !== '') ? $charset : self::DEFAULT_CHARSET;
-
-		if (\array_key_exists('port', $opt)) {
-			$rawPort = $opt['port'];
-			if (\is_int($rawPort)) {
-				$port = $rawPort;
-			} elseif (\is_string($rawPort) && \ctype_digit($rawPort) && $rawPort !== '') {
-				$port = (int)$rawPort;
-			} else {
-				throw new DbConnectException(
-					'DB config: "port" must be a positive integer, got: ' . \get_debug_type($rawPort) . '.'
-				);
-			}
-			if ($port < 1 || $port > 65535) {
-				throw new DbConnectException(
-					'DB config: "port" must be between 1 and 65535, got: ' . $port . '.'
-				);
-			}
-			$this->cfgPort = $port;
-		} else {
-			$this->cfgPort = self::DEFAULT_PORT;
+		$charset = \trim((string)($opt['charset'] ?? $cfg->charset));
+		if ($charset === '') {
+			throw new DbConnectException('DB config: "charset" must not be empty.');
 		}
+		$this->cfgCharset = $charset;
 
-		$socket = $opt['socket'] ?? null;
+		$rawPort = $opt['port'] ?? $cfg->port;
+		if (\is_int($rawPort)) {
+			$port = $rawPort;
+		} elseif (\is_string($rawPort) && \ctype_digit($rawPort) && $rawPort !== '') {
+			$port = (int)$rawPort;
+		} else {
+			throw new DbConnectException(
+				'DB config: "port" must be a positive integer, got: ' . \get_debug_type($rawPort) . '.'
+			);
+		}
+		if ($port < 1 || $port > 65535) {
+			throw new DbConnectException(
+				'DB config: "port" must be between 1 and 65535, got: ' . $port . '.'
+			);
+		}
+		$this->cfgPort = $port;
+
+		$socket = $opt['socket'] ?? $cfg->socket;
 		$this->cfgSocket = ($socket !== null && \trim((string)$socket) !== '')
 			? (string)$socket
 			: null;
 
-		if (\array_key_exists('password_secret', $opt)) {
-			$rawPasswordSecret = $opt['password_secret'];
-			if (!\is_string($rawPasswordSecret)) {
-				throw new DbConnectException(
-					'DB config: "password_secret" must be a non-empty string, got: '
-					. \get_debug_type($rawPasswordSecret) . '.'
-				);
-			}
-
-			$passwordSecret = \trim($rawPasswordSecret);
-			if ($passwordSecret === '') {
-				throw new DbConnectException('DB config: "password_secret" must not be empty.');
-			}
-
-			$this->cfgPasswordSecret = $passwordSecret;
-		} else {
-			$this->cfgPasswordSecret = self::DEFAULT_PASSWORD_SECRET;
+		$rawPasswordSecret = $opt['password_secret'] ?? $cfg->password_secret;
+		if (!\is_string($rawPasswordSecret)) {
+			throw new DbConnectException(
+				'DB config: "password_secret" must be a non-empty string, got: '
+				. \get_debug_type($rawPasswordSecret) . '.'
+			);
 		}
-
-		if (\array_key_exists('connect_timeout', $opt)) {
-			$rawTimeout = $opt['connect_timeout'];
-			if (\is_int($rawTimeout)) {
-				$timeout = $rawTimeout;
-			} elseif (\is_string($rawTimeout) && \ctype_digit($rawTimeout) && $rawTimeout !== '') {
-				$timeout = (int)$rawTimeout;
-			} else {
-				throw new DbConnectException(
-					'DB config: "connect_timeout" must be a positive integer, got: '
-					. \get_debug_type($rawTimeout) . '.'
-				);
-			}
-			if ($timeout < 1) {
-				throw new DbConnectException(
-					'DB config: "connect_timeout" must be >= 1, got: ' . $timeout . '.'
-				);
-			}
-			$this->cfgConnectTimeout = $timeout;
-		} else {
-			$this->cfgConnectTimeout = self::DEFAULT_CONNECT_TIMEOUT;
+		$passwordSecret = \trim($rawPasswordSecret);
+		if ($passwordSecret === '') {
+			throw new DbConnectException('DB config: "password_secret" must not be empty.');
 		}
+		$this->cfgPasswordSecret = $passwordSecret;
 
-		$sqlMode = $opt['sql_mode'] ?? null;
+		$rawTimeout = $opt['connect_timeout'] ?? $cfg->connect_timeout;
+		if (\is_int($rawTimeout)) {
+			$timeout = $rawTimeout;
+		} elseif (\is_string($rawTimeout) && \ctype_digit($rawTimeout) && $rawTimeout !== '') {
+			$timeout = (int)$rawTimeout;
+		} else {
+			throw new DbConnectException(
+				'DB config: "connect_timeout" must be a positive integer, got: '
+				. \get_debug_type($rawTimeout) . '.'
+			);
+		}
+		if ($timeout < 1) {
+			throw new DbConnectException(
+				'DB config: "connect_timeout" must be >= 1, got: ' . $timeout . '.'
+			);
+		}
+		$this->cfgConnectTimeout = $timeout;
+
+		$sqlMode = $opt['sql_mode'] ?? $cfg->sql_mode;
 		$this->cfgSqlMode = ($sqlMode !== null && \trim((string)$sqlMode) !== '')
 			? (string)$sqlMode
 			: null;
 
-		$tz = $opt['timezone'] ?? null;
+		$tz = $opt['timezone'] ?? $cfg->timezone;
 		$this->cfgTimezone = ($tz !== null && \trim((string)$tz) !== '')
 			? (string)$tz
 			: null;
 
-		if (\array_key_exists('statement_cache_limit', $opt)) {
-			$rawLimit = $opt['statement_cache_limit'];
-			if (\is_int($rawLimit)) {
-				$cacheLimit = $rawLimit;
-			} elseif (\is_string($rawLimit) && \ctype_digit($rawLimit) && $rawLimit !== '') {
-				$cacheLimit = (int)$rawLimit;
-			} else {
-				throw new DbConnectException(
-					'DB config: "statement_cache_limit" must be an integer >= 0, got: '
-					. \get_debug_type($rawLimit) . '.'
-				);
-			}
-			if ($cacheLimit < 0) {
-				throw new DbConnectException(
-					'DB config: "statement_cache_limit" must be >= 0, got: ' . $cacheLimit . '.'
-				);
-			}
-			$this->statementCacheLimit = $cacheLimit;
+		$rawLimit = $opt['statement_cache_limit'] ?? $cfg->statement_cache_limit;
+		if (\is_int($rawLimit)) {
+			$cacheLimit = $rawLimit;
+		} elseif (\is_string($rawLimit) && \ctype_digit($rawLimit) && $rawLimit !== '') {
+			$cacheLimit = (int)$rawLimit;
 		} else {
-			$this->statementCacheLimit = self::DEFAULT_STMT_CACHE;
+			throw new DbConnectException(
+				'DB config: "statement_cache_limit" must be an integer >= 0, got: '
+				. \get_debug_type($rawLimit) . '.'
+			);
 		}
+		if ($cacheLimit < 0) {
+			throw new DbConnectException(
+				'DB config: "statement_cache_limit" must be >= 0, got: ' . $cacheLimit . '.'
+			);
+		}
+		$this->statementCacheLimit = $cacheLimit;
 
 		// Global MySQLi reporting mode - affects all mysqli calls in this process.
 		// This is a driver-level flag, not per-connection. Set once per request.

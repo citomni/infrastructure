@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Tests\Db;
 
+use CitOmni\Infrastructure\Boot\Registry;
 use CitOmni\Infrastructure\Exception\DbConnectException;
 use CitOmni\Infrastructure\Exception\DbQueryException;
 use CitOmni\Infrastructure\Service\Db;
@@ -24,6 +25,7 @@ use CitOmni\Infrastructure\Tests\Support\MemorySecrets;
 use function CitOmni\Infrastructure\Tests\Support\expect;
 use function CitOmni\Infrastructure\Tests\Support\export;
 use function CitOmni\Infrastructure\Tests\Support\freePort;
+use function CitOmni\Infrastructure\Tests\Support\mergeLastWins;
 use function CitOmni\Infrastructure\Tests\Support\runChecks;
 use function CitOmni\Infrastructure\Tests\Support\same;
 use function CitOmni\Infrastructure\Tests\Support\squash;
@@ -64,13 +66,23 @@ require __DIR__ . '/../../src/Exception/DbConnectException.php';
 require __DIR__ . '/../../src/Exception/DbQueryException.php';
 require __DIR__ . '/../../src/Service/Db.php';
 
-/** A db cfg node that passes validation. */
+// Registry::CFG_COMMON derives paths from CITOMNI_APP_PATH; this suite writes nothing there.
+\define('CITOMNI_APP_PATH', \sys_get_temp_dir());
+require __DIR__ . '/../../src/Boot/Registry.php';
+
+/** Overrides of the shipped db baseline that pass validation. */
 const VALID = ['host' => '127.0.0.1', 'user' => 'app', 'name' => 'appdb'];
 
 
-/** A Db service on the given db cfg node and service options; the App has no secrets service. */
+/** The shipped db baseline with VALID and $overrides on top. */
+function dbNode(array $overrides = []): array {
+	return mergeLastWins(Registry::CFG_COMMON['db'], $overrides + VALID);
+}
+
+
+/** A Db service on the baseline with the given db overrides and service options; the App has no secrets service. */
 function db(array $dbCfg = VALID, array $options = []): Db {
-	return new Db(new App(['db' => $dbCfg]), $options);
+	return new Db(new App(['db' => dbNode($dbCfg)]), $options);
 }
 
 
@@ -89,12 +101,21 @@ $checks = [
 
 	'host, user and name are required' => static function (): void {
 		foreach (['host', 'user', 'name'] as $key) {
-			$cfg = VALID;
-			unset($cfg[$key]);
-			$e = thrown(DbConnectException::class, static fn() => db($cfg), "without {$key}");
+			$e = thrown(DbConnectException::class, static fn() => db([$key => '']), "empty {$key}");
 			same('DB config: "' . $key . '" is required.', $e->getMessage(), 'message');
-			$cfg[$key] = '   ';
-			thrown(DbConnectException::class, static fn() => db($cfg), "blank {$key}");
+			thrown(DbConnectException::class, static fn() => db([$key => '   ']), "blank {$key}");
+		}
+	},
+
+	// The baseline ships every key, so a node without one is not an application config.
+	'a db node without a shipped key fails with OutOfBoundsException' => static function (): void {
+		thrown(\OutOfBoundsException::class, static fn() => new Db(new App(['db' => VALID])), 'node without the baseline');
+		thrown(\OutOfBoundsException::class, static fn() => new Db(new App([])), 'no db node');
+	},
+
+	'charset must not be empty' => static function (): void {
+		foreach (['', '   ', null] as $value) {
+			thrown(DbConnectException::class, static fn() => db(['charset' => $value]), 'charset ' . export($value));
 		}
 	},
 
@@ -128,13 +149,15 @@ $checks = [
 		same('reporting.db.password', db(VALID + ['password_secret' => ' reporting.db.password '])->__debugInfo()['cfgPasswordSecret'], 'trimmed key');
 	},
 
-	'service options win over cfg' => static function (): void {
+	'service options win over cfg, and an option set to null falls back to the cfg key' => static function (): void {
 		$info = db(VALID, ['host' => 'replica.local', 'name' => 'reporting'])->__debugInfo();
 		same(['replica.local', 'app', 'reporting'], [$info['cfgHost'], $info['cfgUser'], $info['cfgName']], 'host, user, name');
+		$info = db(['socket' => '/run/mysqld.sock'], ['socket' => null, 'port' => null])->__debugInfo();
+		same(['/run/mysqld.sock', 3306], [$info['cfgSocket'], $info['cfgPort']], 'socket and port from cfg');
 	},
 
 	'construction opens no connection and reads no secret' => static function (): void {
-		$app = new App(['db' => VALID]);
+		$app = new App(['db' => dbNode()]);
 		$secrets = new MemorySecrets(['db.password' => 'never-read']);
 		$app->set('secrets', $secrets);
 		$db = new Db($app);
@@ -145,7 +168,7 @@ $checks = [
 	// The secrets stub keeps the password in a public property without __debugInfo(),
 	// so the password shows up in any dump that reaches the App.
 	'debug output carries no password, also after a connection attempt' => static function (): void {
-		$app = new App(['db' => VALID + ['port' => freePort(), 'connect_timeout' => 1]]);
+		$app = new App(['db' => dbNode(['port' => freePort(), 'connect_timeout' => 1])]);
 		$app->set('secrets', new class {
 			public array $values = ['db.password' => 'debug-secret-value'];
 
@@ -163,7 +186,7 @@ $checks = [
 	},
 
 	'a missing password secret fails as DbConnectException without connecting' => static function (): void {
-		$app = new App(['db' => VALID + ['password_secret' => 'custom.key']]);
+		$app = new App(['db' => dbNode(['password_secret' => 'custom.key'])]);
 		$secrets = new MemorySecrets();
 		$app->set('secrets', $secrets);
 		$e = thrown(DbConnectException::class, static fn() => (new Db($app))->fetchValue('SELECT 1'), 'first query');

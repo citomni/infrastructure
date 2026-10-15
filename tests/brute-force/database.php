@@ -79,6 +79,9 @@ if (\PHP_SAPI !== 'cli') {
 require __DIR__ . '/../support/doubles.php';
 require __DIR__ . '/../support/checks.php';
 require __DIR__ . '/../support/test-db.php';
+// Registry::CFG_COMMON derives paths from CITOMNI_APP_PATH; this script writes nothing there.
+\define('CITOMNI_APP_PATH', \sys_get_temp_dir());
+require __DIR__ . '/../../src/Boot/Registry.php';
 require __DIR__ . '/../../src/Enum/TransactionIsolation.php';
 require __DIR__ . '/../../src/Exception/DbException.php';
 require __DIR__ . '/../../src/Exception/DbConnectException.php';

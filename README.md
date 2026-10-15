@@ -974,6 +974,8 @@ The provider's `CFG_COMMON` supplies the baseline nodes for both HTTP and CLI. T
 
 The examples below document **recognized settings** and actual defaults; they are not a request to duplicate the entire registry into each application's config.
 
+`Db`, `Log`, `Curl`, `Mailer`, `ValueToSql` and `ValueFromSql` read the `db`, `log`, `curl`, `mail` and `locale.format` keys directly, without fallbacks in code, so the baseline is the only source of those defaults. A node that an application overrides with an empty array, which replaces it in the merge, or a compiled config from a version of the package that did not ship a key yet, makes the first read throw `\OutOfBoundsException`. Rebuild the compiled config after updating the package: `php bin/citomni cache:warm` from citomni/cli rebuilds both modes; without citomni/cli, call the signed `/_system/reset-cache` or `/_system/warmup-cache` webhook from citomni/http.
+
 ### Database — `db`
 
 | Key | Default | Meaning |
@@ -982,15 +984,13 @@ The examples below document **recognized settings** and actual defaults; they ar
 | `user` | `citomni` | Username |
 | `name` | `citomni` | Database name |
 | `charset` | `utf8mb4` | Connection character set |
-| `port` | `3306` | Optional TCP port |
-| `socket` | `null` | Optional socket path |
+| `port` | `3306` | TCP port |
+| `socket` | `null` | Unix socket path; `null` or `''` for the mysqli default: the default socket for host `localhost`, TCP otherwise |
 | `connect_timeout` | `5` | Connection timeout in seconds |
 | `password_secret` | `db.password` | Name of the secret to read on connection |
-| `sql_mode` | `null` | Optional SQL session mode |
-| `timezone` | PHP time zone | Optional database session time zone |
+| `sql_mode` | `null` | Session SQL mode; `null` or `''` keeps the server default |
+| `timezone` | `null` | Session time zone; `null` or `''` sets the UTC offset of PHP's active time zone |
 | `statement_cache_limit` | `128` | Maximum cached prepared statements; `0` disables |
-
-`port`, `socket`, `connect_timeout`, `password_secret`, `sql_mode`, `timezone`, and `statement_cache_limit` are recognized by `Db` even though the baseline registry omits them.
 
 No plaintext database password key belongs in this node.
 
@@ -1063,6 +1063,7 @@ In addition to registry configuration, the service definition may supply options
 	'reply_to' => ['email' => '', 'name' => ''],
 	'format' => 'html',
 	'transport' => 'smtp',
+	'sendmail_path' => '',
 	'smtp' => [
 		'host' => '',
 		'port' => 587,
@@ -1082,7 +1083,7 @@ In addition to registry configuration, the service definition may supply options
 ],
 ```
 
-The optional `mail.sendmail_path` applies to Sendmail/Qmail transports. SMTP host may be a semicolon-separated list understood by PHPMailer.
+`mail.sendmail_path` applies to the sendmail and qmail transports; `''` uses `/usr/sbin/sendmail` or `/var/qmail/bin/sendmail`. `mail.smtp.auth` and `mail.smtp.auto_tls` must be booleans. SMTP host may be a semicolon-separated list understood by PHPMailer.
 
 For authenticated SMTP, add the secret `mail.smtp.password` to the active app-local secret file. **Do not add that key to the `mail.smtp` config array.**
 

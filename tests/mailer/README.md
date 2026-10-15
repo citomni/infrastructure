@@ -11,7 +11,7 @@ php tests/mailer/run.php
 Expected result:
 
 ```
-14 passed, 0 failed
+15 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -39,7 +39,8 @@ The check marked as a regression failed before the fix it covers; all other chec
 |---|---|
 | the shipped mail cfg builds an SMTP mailer without reading the password | Baseline transport settings, no secret read at construction |
 | the legacy mail.smtp.password cfg key is rejected | Committed credentials fail fast |
-| transport and encryption follow the mail cfg | sendmail, qmail, mail, unknown transports; `tls`, `ssl`; auth off |
+| transport and encryption follow the mail cfg | sendmail, qmail, mail, unknown transports, the standard binary for an empty `sendmail_path`; `tls`, `ssl`; auth off |
+| mail.smtp.auth and mail.smtp.auto_tls must be booleans | `null`, `1` and `'false'` throw, where a cast would turn `null` off and `'false'` on |
 | an HTML message is sent with From and Reply-To from cfg, {vars} injected and a generated text part | Defaults, template vars, generated AltBody, headers and envelope |
 | authenticated SMTP reads mail.smtp.password from Secrets at send time and clears it afterwards | Lazy secret, credentials on the wire, password reset |
 | SMTP without authentication never reads a secret | No AUTH, no secret read |

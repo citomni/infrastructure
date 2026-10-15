@@ -63,11 +63,18 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 */		
 		'db' => [
-			'host'		=> 'localhost',
-			'name'		=> 'citomni',
-			'user'		=> 'citomni',
-			// Password is read from $app->secrets key `db.password`.
-			'charset'	=> 'utf8mb4',
+			'host'                  => 'localhost',   // Database server host name or IP address.
+			'name'                  => 'citomni',     // Database (schema) name.
+			'user'                  => 'citomni',     // Database user.
+			// The node holds no password; password_secret names the secret that does.
+			'charset'               => 'utf8mb4',     // Connection character set; must not be empty.
+			'port'                  => 3306,          // TCP port, 1-65535.
+			'socket'                => null,          // Unix socket path; null or '' for the mysqli default: the default socket for host localhost, TCP otherwise.
+			'connect_timeout'       => 5,             // Connection timeout in seconds, >= 1.
+			'password_secret'       => 'db.password', // Secrets key that holds the database password.
+			'sql_mode'              => null,          // Session sql_mode; null or '' keeps the server default.
+			'timezone'              => null,          // Session time_zone; null or '' sets the UTC offset of PHP's active time zone.
+			'statement_cache_limit' => 128,           // Maximum cached prepared statements; 0 disables the cache.
 		],
 
 
@@ -77,10 +84,10 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 */		
 		'log' => [
-			'path'         => \CITOMNI_APP_PATH . '/var/logs',
-			'default_file' => 'citomni_app.log',
-			'max_bytes'    => 2_000_000,
-			'max_files'    => 10, // or null for unlimited
+			'path'         => \CITOMNI_APP_PATH . '/var/logs', // Log directory; created when missing.
+			'default_file' => 'citomni_app.log',               // File for write(null, ...); normalized to .jsonl.
+			'max_bytes'    => 2_000_000,                       // Size in bytes at which a file is rotated; >= 1024.
+			'max_files'    => 10,                              // Rotated files kept per log file; null for unlimited.
 		],
 
 
@@ -90,21 +97,21 @@ final class Registry {
 		 *------------------------------------------------------------------
 		 */
 		'curl' => [
-			'timeout'           => 30,
-			'connect_timeout'   => 10,
-			'follow_redirects'  => false,
+			'timeout'           => 30,             // Total transfer timeout in seconds; 0 for none, fractions allowed.
+			'connect_timeout'   => 10,             // Connect timeout in seconds; 0 for the libcurl default, fractions allowed.
+			'follow_redirects'  => false,          // Follow Location headers.
 			'max_redirects'     => 10, // Only applies when follow_redirects is true.
-			'user_agent'        => 'CitOmni cURL',
-			'verify_peer'       => true,
-			'verify_host'       => 2,
-			'ca_info'           => null,
-			'proxy'             => null,
-			'return_headers'    => true,
-			'capture_info'      => true,
-			'auto_referer'      => true,
-			'log_errors'        => true,
-			'log_success'       => false,
-			'log_file'          => 'curl.jsonl',
+			'user_agent'        => 'CitOmni cURL', // User-Agent unless a request sets the header.
+			'verify_peer'       => true,           // TLS peer verification: bool, 0, 1, "0" or "1".
+			'verify_host'       => 2,              // TLS host name verification: 0, 2, "0", "2" or bool.
+			'ca_info'           => null,           // CA bundle path; null for the system default.
+			'proxy'             => null,           // Proxy URL; with null, libcurl's proxy environment variables still apply.
+			'return_headers'    => true,           // Capture and parse response headers.
+			'capture_info'      => true,           // Include curl_getinfo() in the response.
+			'auto_referer'      => true,           // Set Referer on followed redirects.
+			'log_errors'        => true,           // Log transport failures through the log service.
+			'log_success'       => false,          // Log completed transfers through the log service.
+			'log_file'          => 'curl.jsonl',   // Log file for both; null for the log service's default file.
 			'reuse_connections' => true, // Share DNS cache + connection pool across calls within one request/process.
 		],
 
@@ -133,8 +140,8 @@ final class Registry {
 			// Transport selection
 			'transport' => 'smtp',     // 'smtp' | 'mail' | 'sendmail' | 'qmail'
 
-			// Path for Sendmail/Qmail transports (optional; PHPMailer uses the same property)
-			// 'sendmail_path' => '/usr/sbin/sendmail', // e.g. '/usr/sbin/sendmail' or '/var/qmail/bin/sendmail'
+			// Binary for the sendmail and qmail transports; '' uses /usr/sbin/sendmail or /var/qmail/bin/sendmail.
+			'sendmail_path' => '',
 
 			// SMTP settings (used only when transport === 'smtp')
 			'smtp' => [

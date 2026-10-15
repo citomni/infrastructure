@@ -17,7 +17,7 @@ php tests/db/database.php
 Expected results:
 
 ```
-13 passed, 0 failed
+15 passed, 0 failed
 23 passed, 0 failed
 ```
 
@@ -51,11 +51,13 @@ All checks pin existing behavior.
 
 | Check | Covers |
 |---|---|
-| host, user and name are required | Mandatory cfg |
+| host, user and name are required | Empty or blank values |
+| a db node without a shipped key fails with OutOfBoundsException | Direct reads of the baseline keys |
+| charset must not be empty | `charset` |
 | the legacy pass key is rejected instead of ignored | `db.pass`, in cfg and options |
-| port, connect_timeout and statement_cache_limit take integers or digit strings in range | Validation and defaults |
+| port, connect_timeout and statement_cache_limit take integers or digit strings in range | Validation and the baseline values |
 | password_secret must be a non-empty string | `password_secret` |
-| service options win over cfg | Option precedence |
+| service options win over cfg, and an option set to null falls back to the cfg key | Option precedence |
 | construction opens no connection and reads no secret | Lazy connection |
 | debug output carries no password, also after a connection attempt | `__debugInfo()`; the password is not kept after a connect |
 | a missing password secret fails as DbConnectException without connecting | Secret lookup and exception chain |

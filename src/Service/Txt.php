@@ -92,13 +92,12 @@ final class Txt extends BaseService {
 	 * @throws TxtConfigException When locale.language is missing or invalid.
 	 */
 	protected function init(): void {
-		$cfg = $this->app->cfg;
-
-		if (!isset($cfg->locale) || !isset($cfg->locale->language)) {
+		// locale.language is application cfg, so its absence is checked rather than assumed.
+		$language = $this->app->cfg->locale->language ?? null;
+		if ($language === null) {
 			throw new TxtConfigException('Missing required config: locale.language');
 		}
-
-		$language = (string)$cfg->locale->language;
+		$language = (string)$language;
 
 		if (!\preg_match(self::LANGUAGE_PATTERN, $language)) {
 			throw new TxtConfigException(

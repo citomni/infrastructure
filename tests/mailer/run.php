@@ -221,6 +221,7 @@ $checks = [
 	'transport and encryption follow the mail cfg' => static function (): void {
 		$cases = [
 			[['transport' => 'sendmail', 'sendmail_path' => '/opt/bin/sendmail'], ['sendmail', '/opt/bin/sendmail']],
+			[['transport' => 'sendmail'], ['sendmail', '/usr/sbin/sendmail']],
 			[['transport' => 'qmail'], ['qmail', '/var/qmail/bin/sendmail']],
 			[['transport' => 'mail'], ['mail', null]],
 			[['transport' => 'pigeon'], ['mail', null]],
@@ -235,6 +236,14 @@ $checks = [
 		same(PHPMailer::ENCRYPTION_STARTTLS, mailer(['smtp' => ['encryption' => 'TLS']])[0]->phpMailer()->SMTPSecure, 'TLS');
 		same(PHPMailer::ENCRYPTION_SMTPS, mailer(['smtp' => ['encryption' => 'ssl']])[0]->phpMailer()->SMTPSecure, 'ssl');
 		same('', mailer(['smtp' => ['auth' => false]])[0]->phpMailer()->Username, 'username without auth');
+	},
+
+	'mail.smtp.auth and mail.smtp.auto_tls must be booleans' => static function (): void {
+		foreach (['auth', 'auto_tls'] as $key) {
+			foreach ([null, 1, 'false'] as $value) {
+				thrown(\UnexpectedValueException::class, static fn() => mailer(['smtp' => [$key => $value]]), "{$key} " . export($value));
+			}
+		}
 	},
 
 	'an HTML message is sent with From and Reply-To from cfg, {vars} injected and a generated text part' => static function (): void {

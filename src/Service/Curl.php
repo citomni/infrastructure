@@ -131,21 +131,21 @@ final class Curl extends BaseService {
 			'body'             => null,
 			'query'            => [],
 			'sensitive_query_keys' => [],
-			'timeout'          => $cfg->timeout ?? 30,
-			'connect_timeout'  => $cfg->connect_timeout ?? 10,
-			'follow_redirects' => (bool)($cfg->follow_redirects ?? false),
-			'max_redirects'    => (int)($cfg->max_redirects ?? 10),
-			'user_agent'       => (string)($cfg->user_agent ?? 'CitOmni cURL'),
-			'verify_peer'      => $cfg->verify_peer ?? true,
-			'verify_host'      => $cfg->verify_host ?? 2,
-			'ca_info'          => $cfg->ca_info ?? null,
-			'proxy'            => $cfg->proxy ?? null,
+			'timeout'          => $cfg->timeout,
+			'connect_timeout'  => $cfg->connect_timeout,
+			'follow_redirects' => (bool)$cfg->follow_redirects,
+			'max_redirects'    => (int)$cfg->max_redirects,
+			'user_agent'       => (string)$cfg->user_agent,
+			'verify_peer'      => $cfg->verify_peer,
+			'verify_host'      => $cfg->verify_host,
+			'ca_info'          => $cfg->ca_info,
+			'proxy'            => $cfg->proxy,
 			'cookie_store'     => null,
 			'cookie_file'      => null,
 			'cookie_jar'       => null,
-			'return_headers'   => (bool)($cfg->return_headers ?? true),
-			'capture_info'     => (bool)($cfg->capture_info ?? true),
-			'auto_referer'     => (bool)($cfg->auto_referer ?? true),
+			'return_headers'   => (bool)$cfg->return_headers,
+			'capture_info'     => (bool)$cfg->capture_info,
+			'auto_referer'     => (bool)$cfg->auto_referer,
 			'referer'          => null,
 			'basic_auth'       => null,
 			'bearer_token'     => null,
@@ -154,12 +154,12 @@ final class Curl extends BaseService {
 			'log_context'      => [],
 		];
 
-		$cfgLogFile = $cfg->log_file ?? null;
+		$cfgLogFile = $cfg->log_file;
 
-		$this->logErrors        = (bool)($cfg->log_errors ?? true);
-		$this->logSuccess       = (bool)($cfg->log_success ?? false);
+		$this->logErrors        = (bool)$cfg->log_errors;
+		$this->logSuccess       = (bool)$cfg->log_success;
 		$this->defaultLogFile   = $cfgLogFile !== null ? (string)$cfgLogFile : null;
-		$this->reuseConnections = (bool)($cfg->reuse_connections ?? true);
+		$this->reuseConnections = (bool)$cfg->reuse_connections;
 
 		if (isset($this->options['defaults']) && \is_array($this->options['defaults'])) {
 			$this->assertKnownRequestKeys($this->options['defaults'], 'Service option "defaults"');

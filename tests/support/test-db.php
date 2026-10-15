@@ -15,9 +15,11 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Tests\Support;
 
+use CitOmni\Infrastructure\Boot\Registry;
+
 /*
  * Test database helpers for the database suites and their workers. Not a suite
- * of its own. Requires doubles.php.
+ * of its own. Requires doubles.php and src/Boot/Registry.php.
  *
  * - Always root on 127.0.0.1:3306 over TCP. The password is read only from
  *   CITOMNI_TEST_PASSWORD; unset means no password. Application configuration is
@@ -70,19 +72,19 @@ function importSql(\mysqli $connection, string $sql): void {
 
 
 /**
- * cfg for the Db service: root on 127.0.0.1:3306 in the given database.
+ * cfg for the Db service: the shipped db baseline, with root on 127.0.0.1:3306 in the given database.
  *
  * @param  array<string, mixed>  $extra  Additional or replacing db keys.
  * @return array<string, mixed>  Value for the "db" cfg node.
  */
 function dbCfg(string $database, array $extra = []): array {
-	return $extra + [
+	return mergeLastWins(Registry::CFG_COMMON['db'], $extra + [
 		'host'    => '127.0.0.1',
 		'user'    => 'root',
 		'name'    => $database,
 		'port'    => 3306,
 		'charset' => 'utf8mb4',
-	];
+	]);
 }
 
 

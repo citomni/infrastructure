@@ -15,6 +15,7 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Tests\Log;
 
+use CitOmni\Infrastructure\Boot\Registry;
 use CitOmni\Infrastructure\Exception\LogConfigException;
 use CitOmni\Infrastructure\Exception\LogDirectoryException;
 use CitOmni\Infrastructure\Exception\LogFileException;
@@ -24,6 +25,7 @@ use CitOmni\Infrastructure\Tests\Support\App;
 use function CitOmni\Infrastructure\Tests\Support\childReport;
 use function CitOmni\Infrastructure\Tests\Support\expect;
 use function CitOmni\Infrastructure\Tests\Support\export;
+use function CitOmni\Infrastructure\Tests\Support\mergeLastWins;
 use function CitOmni\Infrastructure\Tests\Support\readJsonLines;
 use function CitOmni\Infrastructure\Tests\Support\removeTree;
 use function CitOmni\Infrastructure\Tests\Support\runChecks;
@@ -73,6 +75,7 @@ require __DIR__ . '/../../src/Exception/LogFileException.php';
 require __DIR__ . '/../../src/Exception/LogRotationException.php';
 require __DIR__ . '/../../src/Exception/LogWriteException.php';
 require __DIR__ . '/../../src/Service/Log.php';
+require __DIR__ . '/../../src/Boot/Registry.php';
 
 /** Workers in the multi-process check. */
 const PARALLEL_WORKERS = 4;
@@ -97,9 +100,9 @@ function freshDir(): string {
 }
 
 
-/** A Log service on the given "log" cfg node; no node at all when $logCfg is null. */
-function logService(?array $logCfg): Log {
-	return new Log(new App($logCfg === null ? [] : ['log' => $logCfg]));
+/** A Log service on the shipped "log" baseline with $logCfg on top. */
+function logService(array $logCfg = []): Log {
+	return new Log(new App(['log' => mergeLastWins(Registry::CFG_COMMON['log'], $logCfg)]));
 }
 
 
@@ -193,9 +196,15 @@ $checks = [
 		same(['first', 'second'], messages([$dir . '/app.jsonl']), 'messages');
 	},
 
-	'without a log cfg node the logger writes citomni_app.jsonl under CITOMNI_APP_PATH/var/logs' => static function (): void {
-		logService(null)->write(null, 'cat', 'default');
+	'the shipped baseline writes citomni_app.jsonl under CITOMNI_APP_PATH/var/logs' => static function (): void {
+		logService()->write(null, 'cat', 'default');
 		same(['default'], messages([\CITOMNI_APP_PATH . '/var/logs/citomni_app.jsonl']), 'messages');
+	},
+
+	// The baseline ships every key, so a node without one is not an application config.
+	'a missing log node or key fails at init with OutOfBoundsException' => static function (): void {
+		thrown(\OutOfBoundsException::class, static fn() => new Log(new App([])), 'no log node');
+		thrown(\OutOfBoundsException::class, static fn() => new Log(new App(['log' => ['path' => freshDir()]])), 'node without the baseline');
 	},
 
 	'each entry is one JSON line: timestamp, category, message, then context only when non-empty' => static function (): void {
@@ -280,6 +289,9 @@ $checks = [
 		$cases = [
 			[['path' => ''], LogConfigException::class],
 			[['path' => 5], LogConfigException::class],
+			[['path' => null], LogConfigException::class],
+			[['path' => $dir, 'default_file' => null], LogConfigException::class],
+			[['path' => $dir, 'max_bytes' => null], LogConfigException::class],
 			[['path' => $dir, 'default_file' => ''], LogConfigException::class],
 			[['path' => $dir, 'default_file' => '../app.log'], LogFileException::class],
 			[['path' => $dir, 'max_bytes' => '2000000'], LogConfigException::class],
