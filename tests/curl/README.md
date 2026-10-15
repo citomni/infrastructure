@@ -18,7 +18,7 @@ Expected result:
 
 ## How it works
 
-The real service runs on the kernel doubles in `tests/support/doubles.php`, with the shipped `curl` cfg baseline from `Registry::CFG_HTTP` plus short timeouts. Requests go to PHP's built-in web server on a free local port, started with the same PHP binary and php.ini as the suite.
+The real service runs on the kernel doubles in `tests/support/doubles.php`, with the shipped `curl` cfg baseline from `Registry::CFG_COMMON` plus short timeouts. Requests go to PHP's built-in web server on a free local port, started with the same PHP binary and php.ini as the suite.
 
 | File | Role |
 |---|---|

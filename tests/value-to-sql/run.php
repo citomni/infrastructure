@@ -52,7 +52,7 @@ if (\PHP_SAPI !== 'cli') {
 	throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
 });
 
-// CFG_HTTP derives paths from CITOMNI_APP_PATH; this suite reads only locale.format.
+// CFG_COMMON derives paths from CITOMNI_APP_PATH; this suite reads only locale.format.
 \define('CITOMNI_APP_PATH', __DIR__);
 
 require __DIR__ . '/../support/doubles.php';
@@ -71,7 +71,7 @@ require __DIR__ . '/../../src/Service/ValueToSql.php';
 /** A ValueToSql service on the shipped locale.format baseline with $format overrides. */
 function service(array $format = []): ValueToSql {
 	// An empty override would replace the whole node, as in the kernel merge.
-	$cfg = $format === [] ? Registry::CFG_HTTP : mergeLastWins(Registry::CFG_HTTP, ['locale' => ['format' => $format]]);
+	$cfg = $format === [] ? Registry::CFG_COMMON : mergeLastWins(Registry::CFG_COMMON, ['locale' => ['format' => $format]]);
 	return new ValueToSql(new App($cfg));
 }
 

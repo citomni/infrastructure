@@ -23,7 +23,8 @@ namespace CitOmni\Infrastructure\Exception;
  *
  * Notes:
  * - This is a configuration error, not a runtime input error.
- *   Fix by correcting the bruteforce node in CFG_HTTP / citomni_http_cfg.php.
+ *   Fix by correcting the security.bruteforce node in the app cfg; the package baseline
+ *   is Registry::CFG_COMMON.
  */
 final class BruteForceConfigException extends BruteForceException {
 }

@@ -140,7 +140,7 @@ final class Server {
  * @return array{0: Curl, 1: LogRecorder}
  */
 function curl(array $curlCfg = [], array $options = [], bool $withLog = true): array {
-	$cfg = mergeLastWins(Registry::CFG_HTTP, ['curl' => $curlCfg + [
+	$cfg = mergeLastWins(Registry::CFG_COMMON, ['curl' => $curlCfg + [
 		'timeout'         => 5,
 		'connect_timeout' => 2,
 		'user_agent'      => 'CitOmni Curl test',

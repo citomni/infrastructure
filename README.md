@@ -970,7 +970,7 @@ The service uses one row per context/subject rather than storing every failed at
 
 ## Configuration reference
 
-The provider's `CFG_HTTP` and `CFG_CLI` supply the same baseline nodes. The consuming application may override them through normal CitOmni provider/application configuration composition.
+The provider's `CFG_COMMON` supplies the baseline nodes for both HTTP and CLI. The consuming application may override them through normal CitOmni provider/application configuration composition.
 
 The examples below document **recognized settings** and actual defaults; they are not a request to duplicate the entire registry into each application's config.
 

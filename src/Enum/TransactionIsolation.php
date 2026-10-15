@@ -16,29 +16,29 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Enum;
 
 /**
- * Bounded set of transaction isolation levels selectable per transaction.
+ * TransactionIsolation: Enum of the isolation levels that one transaction can select.
  *
- * This is a closed technical contract, not an SQL carrier: the cases name the
- * four SQL-standard isolation levels supported by both declared targets
- * (MySQL 8.0.16+ and MariaDB 10.6+). The mapping from a case to its transaction
- * control statement lives in the Db service, which owns SQL; this enum carries
- * no SQL text, so a caller can never smuggle an arbitrary SQL fragment through
- * it.
+ * A closed technical contract, not an SQL carrier: The cases name the four SQL-standard
+ * isolation levels that both declared targets support (MySQL 8.0.16+ and MariaDB 10.6+), and
+ * they carry no SQL text, so a caller can never smuggle an SQL fragment through them. Turning
+ * a case into its transaction control statement is left to the Db service, which owns SQL.
  *
- * Notes:
- * - Pure enum by design (no backing value): the value space must stay closed and
- *   there is no need for a scalar wire form.
- * - Passed to Db::beginTransaction()/transaction()/easyTransaction() to select
- *   isolation for a single transaction only.
+ * Rules:
+ * - Pure enum, without a backing value: The value space stays closed and has no wire form.
  *
- * Typical usage:
- *   $db->transaction(function (Db $db) {
- *   	// ... work that must serialize under READ COMMITTED ...
- *   }, TransactionIsolation::ReadCommitted);
+ * @see \CitOmni\Infrastructure\Service\Db::transaction()  Selects the isolation for one transaction.
  */
 enum TransactionIsolation {
+
+	/** READ UNCOMMITTED: A read may see changes that other transactions have not committed. */
 	case ReadUncommitted;
+
+	/** READ COMMITTED: Each read sees only data committed before that read began. */
 	case ReadCommitted;
+
+	/** REPEATABLE READ: Repeated reads within the transaction see the same snapshot. */
 	case RepeatableRead;
+
+	/** SERIALIZABLE: Transactions behave as if they ran one after another. */
 	case Serializable;
 }

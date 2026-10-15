@@ -110,7 +110,7 @@ final class Curl extends BaseService {
 	 * Initialize request defaults and logging policy from cfg and service options.
 	 *
 	 * Behavior:
-	 * - Reads the package-owned `curl` cfg node (baseline shipped in Registry::CFG_HTTP / CFG_CLI).
+	 * - Reads the package-owned `curl` cfg node (baseline shipped in Registry::CFG_COMMON).
 	 * - Applies service options on top: `defaults` (array), `log_errors`, `log_success`, `log_file`.
 	 *
 	 * Notes:

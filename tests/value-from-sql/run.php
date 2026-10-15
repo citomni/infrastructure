@@ -53,7 +53,7 @@ if (\PHP_SAPI !== 'cli') {
 	throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
 });
 
-// CFG_HTTP derives paths from CITOMNI_APP_PATH; this suite reads only locale.format.
+// CFG_COMMON derives paths from CITOMNI_APP_PATH; this suite reads only locale.format.
 \define('CITOMNI_APP_PATH', __DIR__);
 
 require __DIR__ . '/../support/doubles.php';
@@ -72,7 +72,7 @@ require __DIR__ . '/../../src/Service/ValueFromSql.php';
 /** A ValueFromSql service on the shipped locale.format baseline with $format overrides. */
 function service(array $format = []): ValueFromSql {
 	// An empty override would replace the whole node, as in the kernel merge.
-	$cfg = $format === [] ? Registry::CFG_HTTP : mergeLastWins(Registry::CFG_HTTP, ['locale' => ['format' => $format]]);
+	$cfg = $format === [] ? Registry::CFG_COMMON : mergeLastWins(Registry::CFG_COMMON, ['locale' => ['format' => $format]]);
 	return new ValueFromSql(new App($cfg));
 }
 
@@ -109,7 +109,7 @@ function rejects(\Closure $format, array $inputs, string $messageKey, string $wh
 $checks = [
 
 	'init requires every locale.format policy key with a valid value' => static function (): void {
-		$baseline = Registry::CFG_HTTP['locale']['format'];
+		$baseline = Registry::CFG_COMMON['locale']['format'];
 		thrown(ValueConfigurationException::class, static fn() => new ValueFromSql(new App([])), 'no locale');
 		foreach (\array_keys($baseline) as $key) {
 			$format = $baseline;

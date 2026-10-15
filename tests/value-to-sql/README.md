@@ -18,7 +18,7 @@ Expected result:
 
 ## How it works
 
-The real service runs on the kernel doubles in `tests/support/doubles.php`. Unless a check sets other separators, it uses the shipped `locale.format` baseline from `Registry::CFG_HTTP`: decimal separator `,` and thousand separator `.`.
+The real service runs on the kernel doubles in `tests/support/doubles.php`. Unless a check sets other separators, it uses the shipped `locale.format` baseline from `Registry::CFG_COMMON`: decimal separator `,` and thousand separator `.`.
 
 The checks are tables of inputs with their expected output, or with the `ValueToSqlException` message key they must be rejected with. The message key is what higher layers translate, so it is part of the contract.
 

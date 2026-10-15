@@ -18,7 +18,7 @@ Expected result:
 
 ## How it works
 
-The real service runs on the kernel doubles in `tests/support/doubles.php`. Unless a check overrides it, it uses the shipped `locale.format` baseline from `Registry::CFG_HTTP`: decimal separator `,`, thousand separator `.`, grouping on, scale 2, rounding `fail`, no trimming of trailing zeros, and no seconds in time and datetime-local values.
+The real service runs on the kernel doubles in `tests/support/doubles.php`. Unless a check overrides it, it uses the shipped `locale.format` baseline from `Registry::CFG_COMMON`: decimal separator `,`, thousand separator `.`, grouping on, scale 2, rounding `fail`, no trimming of trailing zeros, and no seconds in time and datetime-local values.
 
 The checks are tables of inputs with their expected output, or with the `ValueFromSqlException` message key they must be rejected with.
 

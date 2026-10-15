@@ -20,9 +20,9 @@ Expected result:
 
 The suite loads `src/Boot/Registry.php` and the classes it names from their PSR-4 files under `src/`, on the kernel doubles in `tests/support/doubles.php`. `CITOMNI_APP_PATH` points at a fresh `citomni_infrastructure_registry_test_<random>` directory under `sys_get_temp_dir()`, removed afterwards; the log check writes below it.
 
-Every service with package-owned cfg is constructed from `Registry::CFG_HTTP` alone, so a baseline value a service rejects fails here. Two services are constructed elsewhere or with more:
+Every service with package-owned cfg is constructed from `Registry::CFG_COMMON` alone, so a baseline value a service rejects fails here. Two services are constructed elsewhere or with more:
 
-- `txt` reads `locale.language`, which `CFG_HTTP` does not declare. The check adds it on top of the baseline.
+- `txt` reads `locale.language`, which `CFG_COMMON` does not declare. The check adds it on top of the baseline.
 - `mailer` needs PHPMailer and is constructed from the baseline in `tests/mailer`.
 
 ## Checks
@@ -31,8 +31,8 @@ All checks pin existing behavior.
 
 | Check | Covers |
 |---|---|
-| CLI gets the same service map and cfg baseline as HTTP | `MAP_CLI`, `CFG_CLI` |
-| every service id maps to a BaseService subclass under src/ | `MAP_HTTP` |
+| CLI gets the same service map and cfg baseline as HTTP | no `MAP_HTTP`, `MAP_CLI`, `CFG_HTTP` or `CFG_CLI` |
+| every service id maps to a BaseService subclass under src/ | `MAP_COMMON` |
 | the package contributes no routes, controllers or templates | no `ROUTES_HTTP`, no `view` cfg, no files in `src/Controller/` or `templates/` |
 | log constructs from the shipped cfg baseline, creates var/logs and writes citomni_app.jsonl | `log` baseline |
 | secrets constructs from the shipped cfg baseline without reading a file | `secrets` |

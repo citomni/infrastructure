@@ -22,7 +22,7 @@ PHPMailer is loaded from `vendor/phpmailer/phpmailer/src`, so run `composer inst
 
 ## How it works
 
-The real Mailer runs on the kernel doubles in `tests/support/doubles.php`, with `CITOMNI_ENVIRONMENT` set to `prod`, a recording double as the log service, and an in-memory secrets double. Its cfg is the shipped `mail` baseline from `Registry::CFG_HTTP`, pointed at `smtp-server.php` on a free local port. A small subclass, `InspectableMailer`, exposes the PHPMailer instance for checks on its state.
+The real Mailer runs on the kernel doubles in `tests/support/doubles.php`, with `CITOMNI_ENVIRONMENT` set to `prod`, a recording double as the log service, and an in-memory secrets double. Its cfg is the shipped `mail` baseline from `Registry::CFG_COMMON`, pointed at `smtp-server.php` on a free local port. A small subclass, `InspectableMailer`, exposes the PHPMailer instance for checks on its state.
 
 | File | Role |
 |---|---|

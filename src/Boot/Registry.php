@@ -16,19 +16,22 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Boot;
 
 /**
- * Registry:
- * Declares this package's contributions to the host app:
- * - MAP_HTTP / MAP_CLI service bindings
- * - CFG_HTTP / CFG_CLI config overlay
+ * Registry: Boot contributions of citomni/infrastructure.
  *
- * The package contributes no routes, controllers, or templates; pages that use
- * its services (a contact form, for example) belong to the host app.
+ * Declares the services and the cfg baseline that the package contributes to the app at
+ * boot. HTTP and CLI get the same services and the same baseline. The package contributes
+ * no routes, commands, controllers or templates; pages that use its services, such as a
+ * contact form, belong to the app.
  *
- * The App boot process will merge these into the final runtime.
+ * Rules:
+ * - Declarative constants only.
+ * - Services and cfg go in MAP_COMMON and CFG_COMMON. A mode-specific constant holds only
+ *   values that depend on one runtime.
  */
 final class Registry {
-	
-	public const MAP_HTTP = [
+
+	/** Services for HTTP and CLI. */
+	public const array MAP_COMMON = [
 
 		'log'			=> \CitOmni\Infrastructure\Service\Log::class,
 		'txt'			=> \CitOmni\Infrastructure\Service\Txt::class,
@@ -51,7 +54,8 @@ final class Registry {
 	];
 
 
-	public const CFG_HTTP = [
+	/** Cfg baseline for HTTP and CLI. */
+	public const array CFG_COMMON = [
 
 		/*
 		 *------------------------------------------------------------------
@@ -60,9 +64,9 @@ final class Registry {
 		 */		
 		'db' => [
 			'host'		=> 'localhost',
+			'name'		=> 'citomni',
 			'user'		=> 'citomni',
 			// Password is read from $app->secrets key `db.password`.
-			'name'		=> 'citomni',
 			'charset'	=> 'utf8mb4',
 		],
 
@@ -217,10 +221,10 @@ final class Registry {
 	];
 
 
-	// Same defaults for CLI
-	public const MAP_CLI = self::MAP_HTTP;
-
-	// Same defaults for CLI
-	public const CFG_CLI = self::CFG_HTTP;
+	// Mode-specific contributions, only when a value depends on one runtime:
+	// public const array MAP_HTTP = [];
+	// public const array MAP_CLI = [];
+	// public const array CFG_HTTP = [];
+	// public const array CFG_CLI = [];
 
 }

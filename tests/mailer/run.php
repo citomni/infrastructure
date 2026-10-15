@@ -166,7 +166,7 @@ final class SmtpServer {
  * @return array{0: InspectableMailer, 1: LogRecorder, 2: MemorySecrets}
  */
 function mailer(array $mail = [], array $secrets = ['mail.smtp.password' => SMTP_PASSWORD]): array {
-	$cfg = mergeLastWins(Registry::CFG_HTTP, ['mail' => mergeLastWins([
+	$cfg = mergeLastWins(Registry::CFG_COMMON, ['mail' => mergeLastWins([
 		'from'     => ['email' => 'noreply@example.com', 'name' => 'CitOmni Test'],
 		'reply_to' => ['email' => 'support@example.com', 'name' => 'Support'],
 		'smtp'     => ['host' => '127.0.0.1', 'port' => SmtpServer::$port, 'username' => 'mailer@example.com', 'timeout' => 5],
@@ -201,7 +201,7 @@ function contains(string $needle, string $haystack, string $what): void {
 $checks = [
 
 	'the shipped mail cfg builds an SMTP mailer without reading the password' => static function (): void {
-		$app = new App(Registry::CFG_HTTP);
+		$app = new App(Registry::CFG_COMMON);
 		$secrets = new MemorySecrets(['mail.smtp.password' => SMTP_PASSWORD]);
 		$app->set('secrets', $secrets);
 		$m = (new InspectableMailer($app))->phpMailer();

@@ -34,7 +34,7 @@ use function CitOmni\Infrastructure\Tests\Support\thrown;
  * ships: service map, the cfg baseline and language files. It also pins that
  * the package contributes no routes, controllers or templates.
  *
- * Every service with package-owned cfg is constructed from Registry::CFG_HTTP on
+ * Every service with package-owned cfg is constructed from Registry::CFG_COMMON on
  * the kernel doubles, without Composer. CITOMNI_APP_PATH points at a temporary
  * directory that is removed again afterwards.
  *
@@ -60,7 +60,7 @@ const PACKAGE_ROOT = __DIR__ . '/../..';
 require __DIR__ . '/../support/doubles.php';
 require __DIR__ . '/../support/checks.php';
 
-// CFG_HTTP derives paths from CITOMNI_APP_PATH, and Log creates its directory below it.
+// CFG_COMMON derives paths from CITOMNI_APP_PATH, and Log creates its directory below it.
 $root = tempDir('registry');
 \define('CITOMNI_APP_PATH', $root);
 
@@ -106,11 +106,11 @@ function loadPackageClass(string $class): void {
 }
 
 
-/** Construct a mapped service on an App that holds the shipped HTTP baseline plus $cfg. */
+/** Construct a mapped service on an App that holds the shipped baseline plus $cfg. */
 function constructFromBaseline(string $id, array $cfg = []): object {
-	$class = Registry::MAP_HTTP[$id];
+	$class = Registry::MAP_COMMON[$id];
 	loadPackageClass($class);
-	$app = new App(mergeLastWins(Registry::CFG_HTTP, $cfg));
+	$app = new App(mergeLastWins(Registry::CFG_COMMON, $cfg));
 	$app->set('log', new LogRecorder());
 	return new $class($app);
 }
@@ -123,13 +123,14 @@ function constructFromBaseline(string $id, array $cfg = []): object {
 $checks = [
 
 	'CLI gets the same service map and cfg baseline as HTTP' => static function (): void {
-		same(Registry::MAP_HTTP, Registry::MAP_CLI, 'MAP_CLI');
-		same(Registry::CFG_HTTP, Registry::CFG_CLI, 'CFG_CLI');
+		foreach (['MAP_HTTP', 'MAP_CLI', 'CFG_HTTP', 'CFG_CLI'] as $const) {
+			expect(!\defined(Registry::class . '::' . $const), 'Registry declares mode-specific ' . $const);
+		}
 	},
 
 	'every service id maps to a BaseService subclass under src/' => static function (): void {
-		expect(Registry::MAP_HTTP !== [], 'MAP_HTTP is empty');
-		foreach (Registry::MAP_HTTP as $id => $class) {
+		expect(Registry::MAP_COMMON !== [], 'MAP_COMMON is empty');
+		foreach (Registry::MAP_COMMON as $id => $class) {
 			loadPackageClass($class);
 			expect(\is_subclass_of($class, BaseService::class), "{$id} => {$class} does not extend BaseService");
 		}
@@ -139,7 +140,7 @@ $checks = [
 	// the host app; a provider must not impose them.
 	'the package contributes no routes, controllers or templates' => static function (): void {
 		expect(!\defined(Registry::class . '::ROUTES_HTTP'), 'Registry declares ROUTES_HTTP');
-		expect(!isset(Registry::CFG_HTTP['view']), 'CFG_HTTP registers a template layer');
+		expect(!isset(Registry::CFG_COMMON['view']), 'CFG_COMMON registers a template layer');
 		expect((\glob(PACKAGE_ROOT . '/src/Controller/*.php') ?: []) === [], 'src/Controller/ contains controllers');
 		expect((\glob(PACKAGE_ROOT . '/templates/*/*.html') ?: []) === [], 'templates/ contains templates');
 	},
@@ -178,7 +179,7 @@ $checks = [
 	},
 
 	'bruteForce constructs from the shipped cfg baseline with a valid default context' => static function (): void {
-		$policy = Registry::CFG_HTTP['security']['bruteforce']['default'] ?? null;
+		$policy = Registry::CFG_COMMON['security']['bruteforce']['default'] ?? null;
 		expect(\is_array($policy), 'security.bruteforce.default is missing');
 		foreach (['max_identifier_attempts', 'max_ip_attempts', 'interval_minutes', 'retry_after_seconds', 'prune_after_seconds'] as $key) {
 			expect(\is_int($policy[$key] ?? null) && $policy[$key] >= 1, "security.bruteforce.default.{$key} must be an integer >= 1");
