@@ -304,6 +304,9 @@ function waitForPort(int $port, float $seconds = 5.0): void {
  * - Multi-process checks run only with CITOMNI_TEST_PARALLEL=1; otherwise they
  *   are reported as SKIP and counted as skipped.
  * - $beforeEach runs before every check that runs.
+ * - Collects garbage cycles after every check that runs, so objects a check left
+ *   behind in reference cycles, and the database connections they hold, are freed
+ *   before the next check.
  *
  * @param  array<string, \Closure>  $checks          Checks by name.
  * @param  array<string, \Closure>  $parallelChecks  Multi-process checks by name.
@@ -329,6 +332,12 @@ function runChecks(array $checks, array $parallelChecks = [], ?\Closure $beforeE
 		} catch (\Throwable $e) {
 			$failed++;
 			\fwrite(\STDERR, "FAIL {$name} - " . $e::class . ': ' . squash($e->getMessage()) . "\n");
+		} finally {
+			// An App that holds a service which keeps the App forms a cycle that
+			// refcounting never frees, and the automatic collector only runs once its
+			// root buffer fills. Collect now, so such a service's connection closes
+			// before the next check opens another.
+			\gc_collect_cycles();
 		}
 	};
 
