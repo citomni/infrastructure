@@ -64,7 +64,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws \CitOmni\Infrastructure\Exception\DbConnectException On connection or session init failures.
  * @throws \CitOmni\Infrastructure\Exception\DbQueryException   On query prepare, bind, or execute failures.
  */
-final class Db extends BaseService {
+class Db extends BaseService {
 	private const BATCH_ROW_LIMIT         = 1000;
 	private const BATCH_BYTE_LIMIT        = 4 * 1024 * 1024; // 4 MB coarse estimate
 	private const BATCH_CHUNK_SIZE        = 1000;

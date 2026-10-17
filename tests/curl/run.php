@@ -80,7 +80,7 @@ require __DIR__ . '/../../src/Service/Curl.php';
 /**
  * The fixture server: PHP's built-in web server with router.php.
  */
-final class Server {
+class Server {
 
 	public static string $baseUrl = '';
 

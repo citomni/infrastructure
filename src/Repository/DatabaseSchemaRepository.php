@@ -36,7 +36,7 @@ use CitOmni\Kernel\Repository\BaseRepository;
  *       // The caller decides what that means.
  *   }
  */
-final class DatabaseSchemaRepository extends BaseRepository {
+class DatabaseSchemaRepository extends BaseRepository {
 
 	/**
 	 * Check whether a table exists in the current database.

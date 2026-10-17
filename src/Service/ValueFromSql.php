@@ -54,7 +54,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws ValueConfigurationException On invalid locale configuration.
  * @throws ValueDefinitionException On invalid method arguments or unsupported formatting rules.
  */
-final class ValueFromSql extends BaseService {
+class ValueFromSql extends BaseService {
 
 	private const ROUND_FAIL = 'fail';
 	private const ROUND_TRUNCATE = 'truncate';

@@ -113,7 +113,7 @@ const PARALLEL_RECORDS = 25;
 /**
  * The run's admin connection and database.
  */
-final class Env {
+class Env {
 
 	public static \mysqli $admin;
 

@@ -27,7 +27,7 @@ namespace CitOmni\Infrastructure\Exception;
  * - Db connection/query failures still propagate as DbConnectException /
  *   DbQueryException from the Db layer.
  */
-final class BruteForceSetupException extends BruteForceException {
+class BruteForceSetupException extends BruteForceException {
 
 	private ?string $missingTable;
 	private ?string $hint;

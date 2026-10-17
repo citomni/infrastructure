@@ -50,7 +50,7 @@ use CitOmni\Kernel\Service\BaseService;
  *       $token = $this->app->secrets->get('service.optional_token');
  *   }
  */
-final class Secrets extends BaseService {
+class Secrets extends BaseService {
 
 	private bool $loaded = false;
 

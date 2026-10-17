@@ -290,6 +290,12 @@ $checks = [
 		same($e, $e->withField(" \t"), 'blank field');
 	},
 
+	'withField() on a subclass returns a copy of that subclass' => static function (): void {
+		$e = new class('Too many decimals.', 'err_value_from_sql_decimal_too_many_decimals') extends ValueFromSqlException {};
+		$copy = $e->withField('price');
+		same([\get_class($e), 'price'], [\get_class($copy), $copy->getField()], 'class and field of the copy');
+	},
+
 ];
 
 exit(runChecks($checks));

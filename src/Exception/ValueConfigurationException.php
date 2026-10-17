@@ -15,5 +15,5 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Exception;
 
-final class ValueConfigurationException extends \RuntimeException {
+class ValueConfigurationException extends \RuntimeException {
 }

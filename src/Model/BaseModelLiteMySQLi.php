@@ -49,7 +49,7 @@ use LiteMySQLi\LiteMySQLi;
  *
  * Examples:
  *   // Core: Simple lookup using the lazy `$this->db` handle
- *   final class UserModel extends BaseModelLiteMySQLi {
+ *   class UserModel extends BaseModelLiteMySQLi {
  *   	public function findById(int $id): ?array {
  *   		return $this->db->fetchRow('SELECT * FROM user_account WHERE id = ?', [$id]) ?: null;
  *   	}

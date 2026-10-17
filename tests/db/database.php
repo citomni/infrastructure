@@ -82,7 +82,7 @@ require __DIR__ . '/../../src/Service/Db.php';
 /**
  * The run's admin connection and database.
  */
-final class Env {
+class Env {
 
 	public static \mysqli $admin;
 

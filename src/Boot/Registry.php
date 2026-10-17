@@ -28,7 +28,7 @@ namespace CitOmni\Infrastructure\Boot;
  * - Services and cfg go in MAP_COMMON and CFG_COMMON. A mode-specific constant holds only
  *   values that depend on one runtime.
  */
-final class Registry {
+class Registry {
 
 	/** Services for HTTP and CLI. */
 	public const array MAP_COMMON = [

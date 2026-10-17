@@ -11,7 +11,7 @@ namespace CitOmni\Infrastructure\Model;
  * - Keeps benchmark code explicit instead of calling LiteMySQLi ad hoc from controllers.
  * - Uses the same lazy establish() behavior as the previous implementation style.
  */
-final class LiteDbBenchModel extends BaseModelLiteMySQLi {
+class LiteDbBenchModel extends BaseModelLiteMySQLi {
 
 	/**
 	 * Fetch a scalar value through LiteMySQLi.

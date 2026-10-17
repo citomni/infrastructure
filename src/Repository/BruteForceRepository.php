@@ -41,7 +41,7 @@ use CitOmni\Kernel\Repository\BaseRepository;
  *
  * @throws \CitOmni\Infrastructure\Exception\DbQueryException On query failure.
  */
-final class BruteForceRepository extends BaseRepository {
+class BruteForceRepository extends BaseRepository {
 	
 	/** @var string Table name for brute force counter rows. */
 	public const TABLE = 'bruteforce_counters';

@@ -11,7 +11,7 @@ php tests/value-from-sql/run.php
 Expected result:
 
 ```
-17 passed, 0 failed
+18 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -45,5 +45,6 @@ The checks marked as regressions failed before the fixes they cover; all other c
 | text() returns stored text unchanged, whitespace included | No trimming |
 | json() decodes JSON objects and arrays only | Scalars and invalid JSON are rejected |
 | withField() returns a new exception with the field and the original as previous | Regression: `withField()` cloned the exception and always failed with an `Error`. The copy reports the file and line of the `withField()` call |
+| withField() on a subclass returns a copy of that subclass | The copy keeps the class of the original, not `ValueFromSqlException` |
 
 `php tests/run.php` runs every suite in the package.

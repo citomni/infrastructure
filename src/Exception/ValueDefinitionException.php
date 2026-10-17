@@ -28,5 +28,5 @@ namespace CitOmni\Infrastructure\Exception;
  * - This is a developer-side error, not a user input validation error.
  * - Higher layers should normally not convert this into field-level user feedback.
  */
-final class ValueDefinitionException extends \LogicException {
+class ValueDefinitionException extends \LogicException {
 }

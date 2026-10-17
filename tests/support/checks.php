@@ -42,7 +42,7 @@ const TEMP_PREFIX = 'citomni_infrastructure_';
 /**
  * A failed expectation, reported as FAIL with its message.
  */
-final class CheckFailed extends \RuntimeException {
+class CheckFailed extends \RuntimeException {
 }
 
 

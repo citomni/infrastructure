@@ -46,7 +46,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   propagate normally through the global error handler
  * - Cache lifetime is the current request/process lifetime
  */
-final class Txt extends BaseService {
+class Txt extends BaseService {
 	
 	private const LOG_FILE = 'txt.jsonl';
 	private const APP_LAYER = 'app';

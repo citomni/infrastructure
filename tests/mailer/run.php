@@ -92,7 +92,7 @@ const SMTP_PASSWORD = 'smtp-secret-7f3a';
 /**
  * Mailer with read access to its PHPMailer instance.
  */
-final class InspectableMailer extends Mailer {
+class InspectableMailer extends Mailer {
 
 	public function phpMailer(): PHPMailer {
 		return $this->mailer;
@@ -103,7 +103,7 @@ final class InspectableMailer extends Mailer {
 /**
  * The fixture SMTP server.
  */
-final class SmtpServer {
+class SmtpServer {
 
 	public static int $port = 0;
 

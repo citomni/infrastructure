@@ -311,6 +311,12 @@ $checks = [
 		same($e, $e->withField(" \t"), 'blank field');
 	},
 
+	'withField() on a subclass returns a copy of that subclass' => static function (): void {
+		$e = new class('Too long.', 'err_value_to_sql_text_too_long') extends ValueToSqlException {};
+		$copy = $e->withField('title');
+		same([\get_class($e), 'title'], [\get_class($copy), $copy->getField()], 'class and field of the copy');
+	},
+
 ];
 
 exit(runChecks($checks));

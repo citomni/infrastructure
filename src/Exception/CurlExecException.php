@@ -27,7 +27,7 @@ namespace CitOmni\Infrastructure\Exception;
  *
  * @throws void
  */
-final class CurlExecException extends CurlException {
+class CurlExecException extends CurlException {
 
 	private readonly int $curlErrno;
 

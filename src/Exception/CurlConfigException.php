@@ -26,5 +26,5 @@ namespace CitOmni\Infrastructure\Exception;
  *
  * @throws void
  */
-final class CurlConfigException extends CurlException {
+class CurlConfigException extends CurlException {
 }

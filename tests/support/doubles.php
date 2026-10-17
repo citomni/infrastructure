@@ -142,7 +142,7 @@ namespace CitOmni\Infrastructure\Tests\Support {
 
 
 	/** Log service double: keeps every write in order. */
-	final class LogRecorder {
+	class LogRecorder {
 
 		/** @var list<array{file: ?string, category: string, message: string|array|object, context: array}> */
 		public array $records = [];
@@ -163,7 +163,7 @@ namespace CitOmni\Infrastructure\Tests\Support {
 
 
 	/** Secrets service double: the Secrets lookup contract, served from memory. */
-	final class MemorySecrets {
+	class MemorySecrets {
 
 		/** @var list<string> Keys requested through get(), in order. */
 		public array $reads = [];

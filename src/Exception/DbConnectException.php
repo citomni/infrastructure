@@ -35,6 +35,6 @@ namespace CitOmni\Infrastructure\Exception;
  *   	// Database is unreachable or session init failed.
  *   }
  */
-final class DbConnectException extends DbException {
+class DbConnectException extends DbException {
 
 }

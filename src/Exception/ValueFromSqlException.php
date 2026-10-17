@@ -26,13 +26,14 @@ namespace CitOmni\Infrastructure\Exception;
  * - $messageKey is the canonical Txt lookup key.
  * - $field is optional and is typically attached by the caller.
  */
-final class ValueFromSqlException extends \InvalidArgumentException {
+class ValueFromSqlException extends \InvalidArgumentException {
 
 	private ?string $field;
 	private string $messageKey;
 	private array $messageParams;
 
-	public function __construct(string $message, string $messageKey, array $messageParams = [], ?string $field = null, int $code = 0, ?\Throwable $previous = null) {
+	// Final, so that withField() can build a copy of the same class with new static.
+	final public function __construct(string $message, string $messageKey, array $messageParams = [], ?string $field = null, int $code = 0, ?\Throwable $previous = null) {
 		parent::__construct($message, $code, $previous);
 		$this->field = $field;
 		$this->messageKey = $messageKey;
@@ -60,8 +61,8 @@ final class ValueFromSqlException extends \InvalidArgumentException {
 	 *
 	 * Behavior:
 	 * - Trims $field; an empty result returns this exception unchanged.
-	 * - PHP exceptions cannot be cloned, so the copy is a new exception with the same
-	 *   message, message key, params and code, and this exception as previous.
+	 * - PHP exceptions cannot be cloned, so the copy is a new exception of the same class,
+	 *   with the same message, message key, params and code, and this exception as previous.
 	 * - The copy's file and line are set to the call of withField(), matching its trace;
 	 *   the original throw site stays available through getPrevious().
 	 *
@@ -69,15 +70,15 @@ final class ValueFromSqlException extends \InvalidArgumentException {
 	 *   throw $e->withField('price');
 	 *
 	 * @param  string  $field  Field name, e.g. a form input name.
-	 * @return self  The copy, or this exception when $field is empty after trimming.
+	 * @return static  The copy, or this exception when $field is empty after trimming.
 	 */
-	public function withField(string $field): self {
+	public function withField(string $field): static {
 		$field = \trim($field);
 		if ($field === '') {
 			return $this;
 		}
 
-		$copy = new self($this->getMessage(), $this->messageKey, $this->messageParams, $field, $this->getCode(), $this);
+		$copy = new static($this->getMessage(), $this->messageKey, $this->messageParams, $field, $this->getCode(), $this);
 
 		// PHP sets file and line where the exception is created, i.e. inside this method.
 		$caller = $copy->getTrace()[0] ?? [];

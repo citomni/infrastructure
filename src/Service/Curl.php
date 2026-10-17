@@ -54,7 +54,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When the request format is invalid.
  * @throws \CitOmni\Infrastructure\Exception\CurlExecException  When cURL fails at transport level.
  */
-final class Curl extends BaseService {
+class Curl extends BaseService {
 
 	/** Every accepted request key. Anything else is rejected (typos must not be silently ignored). */
 	private const REQUEST_KEYS = [

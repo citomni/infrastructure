@@ -23,4 +23,4 @@ namespace CitOmni\Infrastructure\Exception;
  * files are intentionally not represented by this exception, because those cases
  * must preserve legacy fallback behavior.
  */
-final class TxtConfigException extends \RuntimeException {}
+class TxtConfigException extends \RuntimeException {}

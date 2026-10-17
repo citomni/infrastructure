@@ -71,7 +71,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws ValueConfigurationException On invalid locale configuration.
  * @throws ValueDefinitionException On invalid normalization rule definitions or caller arguments.
  */
-final class ValueToSql extends BaseService {
+class ValueToSql extends BaseService {
 
 	private string $decimalSeparator = ',';
 	private string $thousandSeparator = '.';

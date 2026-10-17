@@ -41,7 +41,7 @@ use CitOmni\Kernel\Service\BaseService;
  *   $db = $this->app->formatNumber->toDb($raw, 14, 2);
  *   $ui = $this->app->formatNumber->fromDb($dbValue, 2, self::UI_THOUSANDS_DOT, self::UI_DECIMAL_COMMA);
  */
-final class FormatNumber extends BaseService {
+class FormatNumber extends BaseService {
 	public const UI_THOUSANDS_DOT = '.';
 	public const UI_THOUSANDS_SPACE = ' ';
 	public const UI_DECIMAL_COMMA = ',';

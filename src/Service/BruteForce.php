@@ -84,7 +84,7 @@ use CitOmni\Kernel\Service\BaseService;
  * @throws BruteForceConfigException When the bruteforce config node is empty or a context is missing or invalid.
  * @throws \InvalidArgumentException On invalid input (empty context, no subjects, etc.).
  */
-final class BruteForce extends BaseService {
+class BruteForce extends BaseService {
 
 	/** @var array<string, array<string, mixed>> Raw context configs keyed by context name. */
 	private array $contexts = [];

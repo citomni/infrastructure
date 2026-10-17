@@ -26,5 +26,5 @@ namespace CitOmni\Infrastructure\Exception;
  *   Fix by correcting the security.bruteforce node in the app cfg; the package baseline
  *   is Registry::CFG_COMMON.
  */
-final class BruteForceConfigException extends BruteForceException {
+class BruteForceConfigException extends BruteForceException {
 }

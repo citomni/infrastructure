@@ -56,7 +56,7 @@ use CitOmni\Kernel\Service\BaseService;
  * Typical usage:
  *   $this->app->log->write(null, 'auth', 'User logged in', ['userId' => 42]);
  */
-final class Log extends BaseService {
+class Log extends BaseService {
 
 	private const MIN_MAX_FILE_SIZE = 1024;
 	private const MAX_NORMALIZE_DEPTH = 8;

@@ -37,7 +37,7 @@ namespace CitOmni\Infrastructure\Exception;
  *   	// Query was invalid or execution failed.
  *   }
  */
-final class DbQueryException extends DbException {
+class DbQueryException extends DbException {
 	private const MYSQL_DUPLICATE_ENTRY_CODE = 1062;
 	private const MYSQL_DEADLOCK_CODE        = 1213;
 
