@@ -1107,7 +1107,7 @@ The registry provides a `default` context:
 
 To separate login, MFA, and other contexts, define additional named entries with their own values. Thresholds, windows, and retry delays must be positive; `prune_after_seconds` defaults to seven days where omitted.
 
-The concrete action name is application-owned. `login`, `2fa`, or `password_reset` are not built-in policies; they are simply possible configuration keys.
+The concrete action name is application-owned. `login`, `2fa`, or `password_reset` are not built-in policies; they are simply possible configuration keys. A context name is matched exactly, letter case included, and must be valid UTF-8 of at most 64 characters; `status()` and `record()` throw `BruteForceConfigException` for any other name.
 
 ---
 

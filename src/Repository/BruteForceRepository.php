@@ -22,17 +22,23 @@ use CitOmni\Kernel\Repository\BaseRepository;
  * BruteForceRepository: Repository for brute force counters in bruteforce_counters.
  *
  * Owns the SQL for the counters: one row per context, subject type and subject hash, which
- * the table's unique key enforces. When a failure counts, when a subject is blocked and how
- * a subject is hashed belong to the BruteForce service.
+ * the table's unique key enforces, and the statements that count a failure on a row. The
+ * limits, the lengths of window and block, and how a subject is hashed belong to the
+ * BruteForce service.
  *
  * Rules:
  * - Work with the UNIX timestamps that the caller passes; never read the clock.
  * - Open no transaction. A caller that needs one owns it.
+ * - Change a counter in one statement that checks its conditions on the row itself, never on
+ *   values that an earlier statement read.
  */
 class BruteForceRepository extends BaseRepository {
 
 	/** Name of the counter table. */
 	public const TABLE = 'bruteforce_counters';
+
+	/** Maximum context length in characters. It must equal the length of bruteforce_counters.context. */
+	public const CONTEXT_MAX_LENGTH = 64;
 
 
 	/**
@@ -58,89 +64,74 @@ class BruteForceRepository extends BaseRepository {
 	 * Create the counter of one subject with its first failure, unless the counter exists.
 	 *
 	 * Behavior:
-	 * - A new counter starts its window at $now with one attempt and no block.
+	 * - A new counter starts its window at $now with one attempt, blocked until $blockedUntil.
 	 * - An existing counter stays unchanged, also when a concurrent call created it first; no
 	 *   duplicate key error escapes.
 	 *
 	 * Notes:
 	 * - INSERT IGNORE turns other row errors into warnings as well, so a context longer than
-	 *   its column is stored truncated rather than rejected.
+	 *   CONTEXT_MAX_LENGTH characters is stored truncated rather than rejected.
 	 *
 	 * @param  string  $context  Context name.
 	 * @param  string  $subjectType  'identifier' or 'ip'.
 	 * @param  string  $subjectHash  SHA-256 hex digest of the normalized subject.
 	 * @param  int  $now  Current UNIX timestamp.
+	 * @param  int  $blockedUntil  UNIX timestamp at which the block of a new counter ends; 0 for no block.
 	 * @return bool  True when this call created the counter.
 	 */
-	public function insertIfMissing(string $context, string $subjectType, string $subjectHash, int $now): bool {
+	public function insertIfMissing(string $context, string $subjectType, string $subjectHash, int $now, int $blockedUntil): bool {
 		return $this->app->db->execute(
 			'INSERT IGNORE INTO ' . self::TABLE
 			. ' (context, subject_type, subject_hash, window_start, attempt_count, blocked_until, created_at, updated_at)'
-			. ' VALUES (?, ?, ?, ?, 1, 0, ?, ?)',
-			[$context, $subjectType, $subjectHash, $now, $now, $now]
+			. ' VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
+			[$context, $subjectType, $subjectHash, $now, $blockedUntil, $now, $now]
 		) > 0;
 	}
 
 
 	/**
-	 * Start a new window on one counter with one attempt.
+	 * Count one more failure on the existing counter of one subject, unless the subject is blocked.
+	 *
+	 * The statement decides on the row as it is under its row lock, so concurrent calls for one
+	 * subject are counted one after another, and the block starts with the call that reaches
+	 * the limit.
 	 *
 	 * Behavior:
-	 * - Sets the window start to $now and the attempt count to 1, and lifts any block.
+	 * - A counter blocked beyond $now stays unchanged.
+	 * - A counter whose window started after $windowStartAfter gets one more attempt. When the
+	 *   attempts reach $maxAttempts, it is blocked until $blockedUntil.
+	 * - Any other counter starts a new window at $now with one attempt, blocked until
+	 *   $restartBlockedUntil.
 	 *
-	 * @param  int  $id  Counter id.
+	 * @param  string  $context  Context name.
+	 * @param  string  $subjectType  'identifier' or 'ip'.
+	 * @param  string  $subjectHash  SHA-256 hex digest of the normalized subject.
 	 * @param  int  $now  Current UNIX timestamp.
-	 * @return void
+	 * @param  int  $windowStartAfter  UNIX timestamp; a window that started after it is still open.
+	 * @param  int  $maxAttempts  Attempts at which the subject is blocked.
+	 * @param  int  $blockedUntil  UNIX timestamp at which the block ends when this count reaches the limit.
+	 * @param  int  $restartBlockedUntil  UNIX timestamp at which the block of a new window ends; 0 for no block.
+	 * @return bool  True when the failure was counted; false when the subject has no counter or is blocked.
 	 */
-	public function resetWindow(int $id, int $now): void {
-		$this->app->db->update(self::TABLE, [
-			'window_start'  => $now,
-			'attempt_count' => 1,
-			'blocked_until' => 0,
-			'updated_at'    => $now,
-		], 'id = ?', [$id]);
-	}
-
-
-	/**
-	 * Count one more attempt on one counter without blocking it.
-	 *
-	 * Behavior:
-	 * - The database adds the attempt, so concurrent calls are all counted.
-	 *
-	 * @param  int  $id  Counter id.
-	 * @param  int  $now  Current UNIX timestamp.
-	 * @return void
-	 */
-	public function increment(int $id, int $now): void {
-		// An expression rather than a value, so execute() instead of update(), which binds values.
-		$this->app->db->execute(
+	public function countFailure(string $context, string $subjectType, string $subjectHash, int $now, int $windowStartAfter, int $maxAttempts, int $blockedUntil, int $restartBlockedUntil): bool {
+		// Each assignment reads only its own column and columns assigned after it, so every
+		// expression sees the row as it was before this statement, whether the server assigns
+		// left to right or, with MariaDB's SIMULTANEOUS_ASSIGNMENT, all at once.
+		return $this->app->db->execute(
 			'UPDATE ' . self::TABLE
-			. ' SET attempt_count = attempt_count + 1, updated_at = ?'
-			. ' WHERE id = ?',
-			[$now, $id]
-		);
-	}
-
-
-	/**
-	 * Count one more attempt on one counter and block its subject until a given time.
-	 *
-	 * Behavior:
-	 * - The database adds the attempt, so concurrent calls are all counted.
-	 *
-	 * @param  int  $id  Counter id.
-	 * @param  int  $now  Current UNIX timestamp.
-	 * @param  int  $blockedUntil  UNIX timestamp at which the block ends.
-	 * @return void
-	 */
-	public function incrementAndBlock(int $id, int $now, int $blockedUntil): void {
-		$this->app->db->execute(
-			'UPDATE ' . self::TABLE
-			. ' SET attempt_count = attempt_count + 1, blocked_until = ?, updated_at = ?'
-			. ' WHERE id = ?',
-			[$blockedUntil, $now, $id]
-		);
+			. ' SET blocked_until = IF(window_start > ?, IF(attempt_count + 1 >= ?, ?, blocked_until), ?),'
+			. ' attempt_count = IF(window_start > ?, attempt_count + 1, 1),'
+			. ' window_start = IF(window_start > ?, window_start, ?),'
+			. ' updated_at = ?'
+			. ' WHERE context = ? AND subject_type = ? AND subject_hash = ? AND blocked_until <= ?',
+			[
+				$windowStartAfter, $maxAttempts, $blockedUntil, $restartBlockedUntil,
+				$windowStartAfter,
+				$windowStartAfter, $now,
+				$now,
+				$context, $subjectType, $subjectHash, $now,
+			]
+		) > 0;
 	}
 
 

@@ -23,19 +23,19 @@ use function CitOmni\Infrastructure\Tests\Support\dbCfg;
 use function CitOmni\Infrastructure\Tests\Support\testSecrets;
 
 /*
- * Worker for the multi-process check in database.php. Not a suite of its own.
+ * Worker for the multi-process checks in database.php. Not a suite of its own.
  *
  * Opens its database connection, creates <readyFile> and waits for <gateFile>.
  * database.php opens the gate only when every worker is ready, so all of them
  * then record <count> failures for the same identifier and IP in the "race"
- * context through the real BruteForce service at the same time. The limits are
- * far above the total, so nothing gets blocked and every failure must be counted.
+ * context through the real BruteForce service at the same time. <limit> is both
+ * max_identifier_attempts and max_ip_attempts of the context.
  *
  * The password is read from CITOMNI_TEST_PASSWORD in the inherited environment;
  * it is never passed on the command line.
  *
  * Usage (database.php builds the command line):
- *   php worker.php <database> <count> <readyFile> <gateFile>
+ *   php worker.php <database> <count> <limit> <readyFile> <gateFile>
  */
 
 if (\PHP_SAPI !== 'cli') {
@@ -51,7 +51,7 @@ if (\PHP_SAPI !== 'cli') {
 	throw new \ErrorException($errstr, 0, $errno, $errfile, $errline);
 });
 
-[, $database, $count, $ready, $gate] = $argv + [null, '', '0', '', ''];
+[, $database, $count, $limit, $ready, $gate] = $argv + [null, '', '0', '0', '', ''];
 
 require __DIR__ . '/../support/doubles.php';
 require __DIR__ . '/../support/test-db.php';
@@ -71,7 +71,7 @@ require __DIR__ . '/../../src/Service/BruteForce.php';
 $app = new App([
 	'db'       => dbCfg($database),
 	'security' => ['bruteforce' => [
-		'race' => ['max_identifier_attempts' => 100000, 'max_ip_attempts' => 100000, 'interval_minutes' => 60, 'retry_after_seconds' => 60],
+		'race' => ['max_identifier_attempts' => (int)$limit, 'max_ip_attempts' => (int)$limit, 'interval_minutes' => 60, 'retry_after_seconds' => 60],
 	]],
 ]);
 $app->set('secrets', testSecrets());

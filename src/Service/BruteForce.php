@@ -128,7 +128,7 @@ class BruteForce extends BaseService {
 	 * @param  string|null  $ip  Client IPv4 or IPv6 address, or null for none; trimmed and lowercased.
 	 * @return array{blocked:bool,reason:'identifier'|'ip'|'both'|null,retry_after_seconds:int,blocked_until:int|null,identifier_attempts:int,ip_attempts:int,identifier_remaining:int,ip_remaining:int,max_identifier_attempts:int,max_ip_attempts:int,interval_minutes:int}  blocked_until is a UNIX timestamp; the max_* and interval_minutes keys are the context's limits.
 	 * @throws \InvalidArgumentException  When the context is empty, the IP address is invalid, or neither subject is given.
-	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured, or one of its limits is missing or below 1.
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured, its name is not valid UTF-8 or longer than BruteForceRepository::CONTEXT_MAX_LENGTH characters, or one of its limits is missing or below 1.
 	 */
 	public function status(string $context, ?string $identifier = null, ?string $ip = null): array {
 
@@ -240,16 +240,15 @@ class BruteForce extends BaseService {
 	 * Behavior:
 	 * - A blocked subject stays unchanged: Attempts during a block neither count nor extend it.
 	 * - A subject without a counter, or whose window has expired, starts a new window with one
-	 *   attempt.
-	 * - Otherwise the attempt is counted, and when the attempts reach the limit, the subject is
-	 *   blocked from now for retry_after_seconds.
-	 * - Concurrent first attempts of one subject create one counter and are all counted.
+	 *   attempt. Otherwise the attempt is counted in the current window.
+	 * - When the attempts reach the limit, the subject is blocked from now for
+	 *   retry_after_seconds. With a limit of 1, the first attempt of a window blocks.
+	 * - Concurrent failures of one subject create one counter and are all counted until the
+	 *   block, which starts with the attempt that reaches the limit.
+	 * - A failure concurrent with clear() of the same subject counts either before the clear,
+	 *   which then removes it, or after it.
 	 * - An IP of 'unknown' or 'cli', in any letter case, is no IP subject. Without an
 	 *   identifier, nothing is counted.
-	 *
-	 * Notes:
-	 * - The limit is compared with the attempts read before the count, so under concurrent
-	 *   failures of one subject a block can start one attempt late.
 	 *
 	 * Typical usage:
 	 *   $this->app->bruteForce->record('login', $email, $ip);
@@ -259,8 +258,7 @@ class BruteForce extends BaseService {
 	 * @param  string|null  $ip  Client IPv4 or IPv6 address, or null for none; trimmed and lowercased.
 	 * @return void
 	 * @throws \InvalidArgumentException  When the context is empty, the IP address is invalid, or neither subject is given.
-	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured, or one of its limits is missing or below 1.
-	 * @throws \RuntimeException  When a counter disappears between its creation attempt and its read, such as by a concurrent clear().
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured, its name is not valid UTF-8 or longer than BruteForceRepository::CONTEXT_MAX_LENGTH characters, or one of its limits is missing or below 1.
 	 */
 	public function record(string $context, ?string $identifier = null, ?string $ip = null): void {
 
@@ -397,10 +395,8 @@ class BruteForce extends BaseService {
 	/**
 	 * Count one failed attempt of one subject.
 	 *
-	 * Behavior:
-	 * - Creates the counter with one attempt when it is missing, so that concurrent first
-	 *   attempts create one counter; otherwise applies the block and window rules to the
-	 *   existing counter.
+	 * Writes only through statements that decide on the counter row itself, so concurrent
+	 * attempts of the subject are counted exactly, also at the limit.
 	 *
 	 * @param  string  $context  Checked context name.
 	 * @param  string  $subjectType  'identifier' or 'ip'.
@@ -410,44 +406,33 @@ class BruteForce extends BaseService {
 	 * @param  int  $retryAfterSeconds  Length of a block in seconds.
 	 * @param  int  $now  Current UNIX timestamp.
 	 * @return void
-	 * @throws \RuntimeException  When the counter disappears between the creation attempt and the read.
 	 * @see \CitOmni\Infrastructure\Service\BruteForce::record()  The rules for a failed attempt.
 	 */
 	private function recordSubject(string $context, string $subjectType, string $subjectValue, int $maxAttempts, int $intervalMinutes, int $retryAfterSeconds, int $now): void {
 
 		$subjectHash = $this->hash($subjectValue);
+		// Must agree with isWindowActive(): A window that started after this moment is open.
+		$windowStartAfter = $now - $intervalMinutes * 60;
+		$blockedUntil = $now + $retryAfterSeconds;
+		// The first attempt of a window reaches the limit only when the limit is 1.
+		$firstAttemptBlockedUntil = $maxAttempts <= 1 ? $blockedUntil : 0;
 
-		if ($this->repo->insertIfMissing($context, $subjectType, $subjectHash, $now)) {
+		if ($this->repo->insertIfMissing($context, $subjectType, $subjectHash, $now, $firstAttemptBlockedUntil)) {
 			return;
 		}
 
-		$row = $this->repo->findBySubject($context, $subjectType, $subjectHash);
-		if ($row === null) {
-			throw new \RuntimeException(
-				'Failed to load brute force counter row after insertIfMissing() reported existing row.'
-			);
-		}
-
-		// Subject is actively blocked - do not modify state.
-		if (((int)$row['blocked_until']) > $now) {
-			return;
-		}
-
-		// Rolling window expired - reset to fresh window with count = 1.
-		if (!$this->isWindowActive((int)$row['window_start'], $intervalMinutes, $now)) {
-			$this->repo->resetWindow((int)$row['id'], $now);
-			return;
-		}
-
-		// Window active - increment and check threshold.
-		$newCount = (int)$row['attempt_count'] + 1;
-
-		if ($newCount >= $maxAttempts) {
-			$this->repo->incrementAndBlock((int)$row['id'], $now, $now + $retryAfterSeconds);
-			return;
-		}
-
-		$this->repo->increment((int)$row['id'], $now);
+		// No match needs no handling: The subject is blocked, or a concurrent clear() deleted the
+		// counter after the insert above, which ends as if the clear had come after this attempt.
+		$this->repo->countFailure(
+			$context,
+			$subjectType,
+			$subjectHash,
+			$now,
+			$windowStartAfter,
+			$maxAttempts,
+			$blockedUntil,
+			$firstAttemptBlockedUntil
+		);
 	}
 
 
@@ -456,7 +441,7 @@ class BruteForce extends BaseService {
 	 *
 	 * @param  string  $context  Trimmed context name.
 	 * @return array{max_identifier_attempts:int,max_ip_attempts:int,interval_minutes:int,retry_after_seconds:int}
-	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured as an array, or one of the four limits is missing or below 1.
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured as an array, its name is not valid UTF-8 or longer than BruteForceRepository::CONTEXT_MAX_LENGTH characters, or one of the four limits is missing or below 1.
 	 */
 	private function resolveContext(string $context): array {
 
@@ -468,6 +453,17 @@ class BruteForce extends BaseService {
 			throw new BruteForceConfigException(
 				"Brute force context '{$context}' is not configured. "
 				. 'Add it under security.bruteforce.'
+			);
+		}
+
+		// Characters, the unit of CONTEXT_MAX_LENGTH; false for invalid UTF-8. A name that does not
+		// fit would be stored altered, where no later lookup finds it.
+		$nameLength = \preg_match_all('/./su', $context);
+
+		if ($nameLength === false || $nameLength > BruteForceRepository::CONTEXT_MAX_LENGTH) {
+			throw new BruteForceConfigException(
+				"Brute force context '{$context}': the name must be valid UTF-8 of at most "
+				. BruteForceRepository::CONTEXT_MAX_LENGTH . ' characters.'
 			);
 		}
 

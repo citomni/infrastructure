@@ -25,7 +25,7 @@ DROP TABLE IF EXISTS `bruteforce_counters`;
 /*!40101 SET character_set_client = utf8mb4 */;
 CREATE TABLE `bruteforce_counters` (
   `id` bigint(20) unsigned NOT NULL AUTO_INCREMENT,
-  `context` varchar(64) NOT NULL,
+  `context` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
   `subject_type` enum('identifier','ip') NOT NULL,
   `subject_hash` char(64) NOT NULL,
   `window_start` int(10) unsigned NOT NULL,
@@ -49,4 +49,4 @@ CREATE TABLE `bruteforce_counters` (
 /*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
 /*M!100616 SET NOTE_VERBOSITY=@OLD_NOTE_VERBOSITY */;
 
--- Dump completed on 2026-10-15 17:19:57
+-- Dump completed on 2026-10-17 15:55:27

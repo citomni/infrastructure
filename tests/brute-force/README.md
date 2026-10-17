@@ -11,10 +11,10 @@ php tests/brute-force/database.php
 Expected result:
 
 ```
-14 passed, 0 failed, 1 skipped
+19 passed, 0 failed, 2 skipped
 ```
 
-The skipped check starts several worker processes at once. It runs only when `CITOMNI_TEST_PARALLEL` is `1`:
+The skipped checks start several worker processes at once. They run only when `CITOMNI_TEST_PARALLEL` is `1`:
 
 ```
 :: cmd
@@ -26,10 +26,10 @@ $env:CITOMNI_TEST_PARALLEL = '1'
 php tests/brute-force/database.php
 ```
 
-Expected result with the multi-process check:
+Expected result with the multi-process checks:
 
 ```
-15 passed, 0 failed
+21 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -46,14 +46,14 @@ When the server is down, the suite fails; nothing is skipped.
 
 The service reads the clock with `time()`. Instead of waiting, checks move the stored timestamps of a subject back (`window_start`, `updated_at`, and an active `blocked_until`), as if that time had passed.
 
+The overlap checks run in one process. The service under test gets a Db that runs a competing call, through a second service with its own connection, right after a chosen statement of the service, so two calls overlap at a known point instead of by chance.
+
 | File | Role |
 |---|---|
 | `database.php` | Runner and checks. |
-| `worker.php` | Child for the multi-process check. Opens its connection, reports ready through a file, waits for the start gate, then records failures through the real service. The gate opens only when every worker is ready. |
+| `worker.php` | Child for the multi-process checks. Opens its connection, reports ready through a file, waits for the start gate, then records failures through the real service with the limit it is given. The gate opens only when every worker is ready. |
 
 ## Checks
-
-All checks pin existing behavior.
 
 | Check | Covers |
 |---|---|
@@ -65,12 +65,18 @@ All checks pin existing behavior.
 | the transport sentinels "unknown" and "cli" give no IP subject | Sentinels in `status()`, `record()` and `clear()` |
 | invalid input is rejected before any lookup | Context, subjects, IP validation, unconfigured contexts |
 | contexts are validated on first use and the config node is required | `BruteForceConfigException`; `OutOfBoundsException` from Cfg without the node |
+| a context name that the context column cannot hold is rejected as configuration | `BruteForceConfigException` for 65 characters and for invalid UTF-8, before any write; 64 two-byte characters are stored intact |
+| contexts that differ only in letter case have separate counters | The `utf8mb4_bin` collation of `context`; `status()` and `clear()` match the exact name |
 | a blocked subject is not counted further | No writes while blocked |
 | an expired window is ignored by status() and restarted by the next failure | Rolling window |
 | an active block outlives its window, and an expired block allows a fresh window | Block versus window |
+| a limit of 1 blocks the first failure of every window | The first attempt of a new counter and of a restarted window |
 | clear() removes only the requested buckets, also for unconfigured contexts | Bucket scope |
+| two failures that overlap at the limit block the subject | A competing failure after the first and after the second statement of another; the block does not depend on a count read earlier |
+| a failure that overlaps clear() of its subject is removed with it | clear() between the insert that finds the counter and the count: no exception, no counter |
 | prune() applies prune_after_seconds per context and removes orphans after 30 days | Per-context and orphan pruning, the 7-day default |
 | status() never writes | Read-only status |
-| concurrent failures create one bucket per subject and lose no increments | With `CITOMNI_TEST_PARALLEL=1` only: 4 processes record 25 failures each for the same identifier and IP at once. Each subject must end with one row and 100 attempts. |
+| concurrent failures create one bucket per subject and lose no increments | With `CITOMNI_TEST_PARALLEL=1` only: 4 processes record 25 failures each for the same identifier and IP at once, with limits far above the total. Each subject must end with one row and 100 attempts. |
+| concurrent failures block at the limit and are not counted after it | With `CITOMNI_TEST_PARALLEL=1` only: the same 100 failures with a limit of 50. Each subject must end blocked with exactly 50 attempts. |
 
 `php tests/run.php` runs every suite in the package.

@@ -48,7 +48,8 @@ use function CitOmni\Infrastructure\Tests\Support\waitForFiles;
  * run on the kernel doubles, without Composer. The run creates one database,
  * citomni_infrastructure_brute_force_test_<random>, imports the schema before
  * every check, and drops only that database in finally. Time is simulated by
- * moving the stored timestamps back.
+ * moving the stored timestamps back. Overlapping calls are run in one process by
+ * letting a competing call run between two statements of another.
  *
  * Usage:
  *   php tests/brute-force/database.php
@@ -57,7 +58,7 @@ use function CitOmni\Infrastructure\Tests\Support\waitForFiles;
  * - Connects as root to 127.0.0.1:3306 over TCP. The password is read only from
  *   CITOMNI_TEST_PASSWORD; unset means no password. Workers inherit it through
  *   the environment.
- * - The multi-process check runs only with CITOMNI_TEST_PARALLEL=1. It starts
+ * - The multi-process checks run only with CITOMNI_TEST_PARALLEL=1. Each starts
  *   worker.php several times at once.
  */
 
@@ -103,7 +104,7 @@ const CONTEXTS = [
 	'api'   => ['max_identifier_attempts' => 4, 'max_ip_attempts' => 4, 'interval_minutes' => 10, 'retry_after_seconds' => 60],
 ];
 
-/** Workers in the multi-process check. */
+/** Workers in each multi-process check. */
 const PARALLEL_WORKERS = 4;
 
 /** Failures each worker records. */
@@ -137,6 +138,31 @@ function app(array $contexts = CONTEXTS): App {
 /** A BruteForce service on the test database. */
 function bruteForce(array $contexts = CONTEXTS): BruteForce {
 	return new BruteForce(app($contexts));
+}
+
+
+/**
+ * A BruteForce service on the test database whose Db runs $competingCall once, right after
+ * the service's statement number $afterStatement, so a competing call overlaps at a known point.
+ */
+function bruteForceWithCompetitor(int $afterStatement, \Closure $competingCall): BruteForce {
+	$app = app();
+	$app->set('db', new class($app->db, $afterStatement, $competingCall) {
+
+		private int $statements = 0;
+
+		public function __construct(private object $db, private int $afterStatement, private \Closure $competingCall) {
+		}
+
+		public function __call(string $method, array $args): mixed {
+			$result = $this->db->{$method}(...$args);
+			if (++$this->statements === $this->afterStatement) {
+				($this->competingCall)();
+			}
+			return $result;
+		}
+	});
+	return new BruteForce($app);
 }
 
 
@@ -199,6 +225,39 @@ function seed(string $context, string $subject, int $updatedAt): void {
 /** The subset of a status() result named by $keys. */
 function pick(array $status, string ...$keys): array {
 	return \array_intersect_key($status, \array_flip($keys));
+}
+
+
+/**
+ * Start PARALLEL_WORKERS workers that record PARALLEL_RECORDS failures each, all at once, for
+ * the same identifier and IP in the "race" context with $limit as both limits, and wait for them.
+ */
+function race(int $limit): void {
+	$dir   = tempDir('brute_force');
+	$gate  = $dir . '/go';
+	$procs = [];
+	$ready = [];
+	try {
+		for ($w = 0; $w < PARALLEL_WORKERS; $w++) {
+			$ready[$w] = $dir . "/ready{$w}";
+			$procs[$w] = startPhp([__DIR__ . '/worker.php', Env::$database, (string)PARALLEL_RECORDS, (string)$limit, $ready[$w], $gate], $dir . "/worker{$w}.out", $dir . "/worker{$w}.err");
+		}
+
+		// Open the start gate only when every worker is connected and ready.
+		$allReady = waitForFiles($ready, 10.0);
+		\touch($gate);
+
+		$exits = [];
+		foreach ($procs as $w => $proc) {
+			$exits[$w] = \proc_close($proc);
+		}
+		foreach ($exits as $w => $exit) {
+			same(0, $exit, "worker {$w} exit code (" . childReport($exit, $dir . "/worker{$w}.out", $dir . "/worker{$w}.err") . ')');
+		}
+		expect($allReady, 'not every worker was ready within 10 seconds');
+	} finally {
+		removeTree($dir);
+	}
 }
 
 
@@ -322,6 +381,33 @@ $checks = [
 		thrown(BruteForceConfigException::class, static fn() => new BruteForce(new App(['security' => ['bruteforce' => []]])), 'empty security.bruteforce');
 	},
 
+	'a context name that the context column cannot hold is rejected as configuration' => static function (): void {
+		$tooLong = \str_repeat('x', 65);
+		$invalid = "login\xFF";
+		// 64 characters of two bytes each: at the limit, which counts characters.
+		$fits = \str_repeat("\u{E6}", 64);
+		$bf = bruteForce([$tooLong => CONTEXTS['login'], $invalid => CONTEXTS['login'], $fits => CONTEXTS['login']]);
+		foreach ([$tooLong, $invalid] as $context) {
+			thrown(BruteForceConfigException::class, static fn() => $bf->status($context, 'user@example.com'), 'status() with context ' . export($context));
+			thrown(BruteForceConfigException::class, static fn() => $bf->record($context, 'user@example.com'), 'record() with context ' . export($context));
+		}
+		same([], rows(), 'rows after the rejected contexts');
+		$bf->record($fits, 'user@example.com');
+		$bf->record($fits, 'user@example.com');
+		same([[$fits, '2']], \array_map(static fn(array $r): array => [$r['context'], $r['attempt_count']], rows()), 'counter of the 64-character context');
+	},
+
+	'contexts that differ only in letter case have separate counters' => static function (): void {
+		$bf = bruteForce(['login' => CONTEXTS['login'], 'Login' => CONTEXTS['login']]);
+		$bf->record('login', 'user@example.com');
+		$bf->record('Login', 'user@example.com');
+		$bf->record('Login', 'user@example.com');
+		same([['login', '1'], ['Login', '2']], \array_map(static fn(array $r): array => [$r['context'], $r['attempt_count']], rows()), 'rows');
+		same([1, 2], [$bf->status('login', 'user@example.com')['identifier_attempts'], $bf->status('Login', 'user@example.com')['identifier_attempts']], 'identifier_attempts per context');
+		$bf->clear('LOGIN', 'user@example.com');
+		same(2, \count(rows()), 'rows after clear() with a third spelling');
+	},
+
 	'a blocked subject is not counted further' => static function (): void {
 		$bf = bruteForce();
 		for ($i = 0; $i < 3; $i++) {
@@ -362,6 +448,16 @@ $checks = [
 		same([1, 0], [$row['attempt_count'], $row['blocked_until']], 'attempt_count and blocked_until');
 	},
 
+	'a limit of 1 blocks the first failure of every window' => static function (): void {
+		$bf = bruteForce(['once' => ['max_identifier_attempts' => 1, 'max_ip_attempts' => 1, 'interval_minutes' => 15, 'retry_after_seconds' => 60]]);
+		$bf->record('once', 'user@example.com', '203.0.113.9');
+		same(['blocked' => true, 'reason' => 'both', 'identifier_attempts' => 1, 'ip_attempts' => 1], pick($bf->status('once', 'user@example.com', '203.0.113.9'), 'blocked', 'reason', 'identifier_attempts', 'ip_attempts'), 'after the first failure');
+		age('once', 'identifier', 'user@example.com', 16 * 60);
+		same(false, $bf->status('once', 'user@example.com')['blocked'], 'after the block and the window expired');
+		$bf->record('once', 'user@example.com');
+		same(['blocked' => true, 'identifier_attempts' => 1], pick($bf->status('once', 'user@example.com'), 'blocked', 'identifier_attempts'), 'after the first failure of the new window');
+	},
+
 	'clear() removes only the requested buckets, also for unconfigured contexts' => static function (): void {
 		$bf = bruteForce();
 		$bf->record('login', 'user@example.com', '198.51.100.1');
@@ -373,6 +469,26 @@ $checks = [
 		seed('removed_context', 'user@example.com', \time());
 		$bf->clear('removed_context', ' USER@example.com');
 		same(1, \count(rows()), 'rows after clearing an unconfigured context');
+	},
+
+	'two failures that overlap at the limit block the subject' => static function (): void {
+		// login blocks an identifier at 3 failures. After one failure, two more overlap: the
+		// competing one runs whole right after the first or the second statement of the other.
+		foreach ([1, 2] as $afterStatement) {
+			$identifier = "user{$afterStatement}@example.com";
+			bruteForce()->record('login', $identifier);
+			$competitor = bruteForce();
+			bruteForceWithCompetitor($afterStatement, static fn() => $competitor->record('login', $identifier))->record('login', $identifier);
+			same(['blocked' => true, 'identifier_attempts' => 3], pick(bruteForce()->status('login', $identifier), 'blocked', 'identifier_attempts'), "status with the competing failure after statement {$afterStatement}");
+		}
+	},
+
+	'a failure that overlaps clear() of its subject is removed with it' => static function (): void {
+		bruteForce()->record('login', 'user@example.com');
+		$clearer = bruteForce();
+		// clear() runs between the insert that finds the counter and the count.
+		bruteForceWithCompetitor(1, static fn() => $clearer->clear('login', 'user@example.com'))->record('login', 'user@example.com');
+		same([], rows(), 'rows');
 	},
 
 	'prune() applies prune_after_seconds per context and removes orphans after 30 days' => static function (): void {
@@ -412,37 +528,23 @@ $checks = [
 $parallelChecks = [
 
 	'concurrent failures create one bucket per subject and lose no increments' => static function (): void {
-		$dir   = tempDir('brute_force');
-		$gate  = $dir . '/go';
-		$procs = [];
-		$ready = [];
-		try {
-			for ($w = 0; $w < PARALLEL_WORKERS; $w++) {
-				$ready[$w] = $dir . "/ready{$w}";
-				$procs[$w] = startPhp([__DIR__ . '/worker.php', Env::$database, (string)PARALLEL_RECORDS, $ready[$w], $gate], $dir . "/worker{$w}.out", $dir . "/worker{$w}.err");
-			}
-
-			// Open the start gate only when every worker is connected and ready.
-			$allReady = waitForFiles($ready, 10.0);
-			\touch($gate);
-
-			$exits = [];
-			foreach ($procs as $w => $proc) {
-				$exits[$w] = \proc_close($proc);
-			}
-			foreach ($exits as $w => $exit) {
-				same(0, $exit, "worker {$w} exit code (" . childReport($exit, $dir . "/worker{$w}.out", $dir . "/worker{$w}.err") . ')');
-			}
-			expect($allReady, 'not every worker was ready within 10 seconds');
-		} finally {
-			removeTree($dir);
-		}
-
+		// Limits far above the total, so nothing gets blocked and every failure must be counted.
+		race(100_000);
 		$expected = PARALLEL_WORKERS * PARALLEL_RECORDS;
 		same(2, \count(rows()), 'rows');
 		$identifier = row('race', 'identifier', 'shared@example.com') ?? [];
 		same([$expected, 0], [$identifier['attempt_count'] ?? null, $identifier['blocked_until'] ?? null], 'identifier attempt_count and blocked_until');
 		same($expected, row('race', 'ip', '198.51.100.9')['attempt_count'] ?? null, 'IP attempt_count');
+	},
+
+	'concurrent failures block at the limit and are not counted after it' => static function (): void {
+		$limit = \intdiv(PARALLEL_WORKERS * PARALLEL_RECORDS, 2);
+		race($limit);
+		foreach ([['identifier', 'shared@example.com'], ['ip', '198.51.100.9']] as [$type, $value]) {
+			$row = row('race', $type, $value) ?? [];
+			same($limit, $row['attempt_count'] ?? null, "{$type} attempt_count");
+			expect(($row['blocked_until'] ?? 0) > \time(), "{$type} is not blocked: " . export($row));
+		}
 	},
 
 ];
