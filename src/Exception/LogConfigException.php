@@ -16,6 +16,9 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Thrown when logger configuration is invalid.
+ * LogConfigException: Exception for a log cfg value or setter argument that the log service rejects.
+ *
+ * Marks a configuration error, not a failure to write: Let it reach the global error
+ * handler. Fixing the value belongs to the app's cfg files or to the calling code.
  */
 class LogConfigException extends LogException {}

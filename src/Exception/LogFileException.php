@@ -16,6 +16,10 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Base exception for log file related failures.
+ * LogFileException: Exception for a log file that cannot be used.
+ *
+ * Marks a failure of one log file, such as an invalid file name or a lock or log file that
+ * cannot be opened or locked. Its subclasses narrow it to a failed write and a failed
+ * rotation.
  */
 class LogFileException extends LogException {}

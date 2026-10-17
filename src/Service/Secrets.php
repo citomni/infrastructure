@@ -17,55 +17,46 @@ namespace CitOmni\Infrastructure\Service;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Secrets: Read application secrets from the app-local secret store.
+ * Secrets: Service that reads application secrets from the app's secret store.
  *
- * The store is a side-effect-free, environment-specific PHP file under
- * /var/secrets that returns a flat string-to-string map. The active file is
- * selected from CITOMNI_ENVIRONMENT:
- * - dev:   /var/secrets/app.secret.dev.php
- * - stage: /var/secrets/app.secret.stage.php
- * - prod:  /var/secrets/app.secret.prod.php
+ * Keeps credentials out of cfg. Each environment has a store of its own: a PHP file under the
+ * app's var/secrets that returns a flat map of string keys to string values, such as
+ * mail.smtp.password. The file is executed with require, so it must be free of side effects.
+ * Writing and rotating the files, and keeping them out of version control, belong to the
+ * app's deployment.
  *
- * Keys may use dotted names for readable namespacing, for example
- * `mail.smtp.password`.
- *
- * Behavior:
- * - Resolves the active secret file from CITOMNI_ENVIRONMENT.
- * - Loads that secret file lazily on the first has() or get() call.
- * - Memoizes the validated map for the lifetime of the App instance.
- * - Treats a missing secret file as an empty store.
- * - Fails fast when an existing secret file is invalid or unreadable.
- * - Never exposes the complete secret map through the public API or debug output.
- *
- * Notes:
- * - Real secret files must remain outside version control.
- * - No fallback occurs between environments; each environment has its own store.
- * - Secret rotation is visible to new App instances; an existing instance keeps
- *   its already loaded values for deterministic request/process behavior.
- * - No SQL or transport concerns.
- *
- * Typical usage:
- *   $password = $this->app->secrets->get('mail.smtp.password');
- *   if ($this->app->secrets->has('service.optional_token')) {
- *       $token = $this->app->secrets->get('service.optional_token');
- *   }
+ * Rules:
+ * - Expose a value only to the caller that asks for its key; never the map, the keys, or a
+ *   value in debug output.
+ * - Load the store at most once per instance, so an instance keeps the values it first read.
+ * - Never fall back to the store of another environment.
  */
 class Secrets extends BaseService {
 
+	/** Whether the store of this instance has been loaded. */
 	private bool $loaded = false;
 
-	/** @var array<string,string> */
+	/** @var array<string,string> Secret values by key. */
 	private array $secrets = [];
 
 
 	/**
-	 * Determine whether a secret exists.
+	 * Tell whether a secret exists.
 	 *
-	 * @param string $key Exact secret key.
-	 * @return bool True when the secret exists.
-	 * @throws \InvalidArgumentException When the key is empty or padded with whitespace.
-	 * @throws \RuntimeException When the environment is invalid or the secret file cannot be read.
-	 * @throws \UnexpectedValueException When the secret file or its contents are invalid.
+	 * Behavior:
+	 * - The first call to has() or get() loads the store of CITOMNI_ENVIRONMENT. A missing
+	 *   store file is an empty store.
+	 *
+	 * Typical usage:
+	 *   if ($this->app->secrets->has('service.optional_token')) {
+	 *       $token = $this->app->secrets->get('service.optional_token');
+	 *   }
+	 *
+	 * @param  string  $key  Exact key; never trimmed.
+	 * @return bool
+	 * @throws \InvalidArgumentException  When the key is empty or has leading or trailing whitespace.
+	 * @throws \RuntimeException  When CITOMNI_ENVIRONMENT is missing or not dev, stage or prod, or the store file is not readable.
+	 * @throws \UnexpectedValueException  When the store path is not a regular file, or the file returns anything but a map of non-empty, unpadded string keys to string values.
 	 */
 	public function has(string $key): bool {
 		$this->validateKey($key);
@@ -76,14 +67,18 @@ class Secrets extends BaseService {
 
 
 	/**
-	 * Return one secret value.
+	 * Return one secret.
 	 *
-	 * @param string $key Exact secret key.
-	 * @return string Secret value.
-	 * @throws \InvalidArgumentException When the key is empty or padded with whitespace.
-	 * @throws \OutOfBoundsException When the requested secret does not exist.
-	 * @throws \RuntimeException When the environment is invalid or the secret file cannot be read.
-	 * @throws \UnexpectedValueException When the secret file or its contents are invalid.
+	 * Typical usage:
+	 *   $password = $this->app->secrets->get('mail.smtp.password');
+	 *
+	 * @param  string  $key  Exact key; never trimmed.
+	 * @return string
+	 * @throws \InvalidArgumentException  When the key is empty or has leading or trailing whitespace.
+	 * @throws \OutOfBoundsException  When the store holds no secret with the key.
+	 * @throws \RuntimeException  When CITOMNI_ENVIRONMENT is missing or not dev, stage or prod, or the store file is not readable.
+	 * @throws \UnexpectedValueException  When the store path is not a regular file, or the file returns anything but a map of non-empty, unpadded string keys to string values.
+	 * @see \CitOmni\Infrastructure\Service\Secrets::has()  When the store is loaded.
 	 */
 	public function get(string $key): string {
 		$this->validateKey($key);
@@ -98,9 +93,9 @@ class Secrets extends BaseService {
 
 
 	/**
-	 * Return a safe debug representation without secret values or keys.
+	 * Describe the service for var_dump() without keys or values.
 	 *
-	 * @return array{loaded:bool} Safe debug state.
+	 * @return array{loaded:bool}
 	 */
 	public function __debugInfo(): array {
 		return [
@@ -110,16 +105,14 @@ class Secrets extends BaseService {
 
 
 	/**
-	 * Load and validate the app-local secret store once.
+	 * Load and check the store of the active environment, once per instance.
 	 *
 	 * Behavior:
-	 * - A missing file produces an empty store.
-	 * - An existing file must be a readable regular PHP file returning
-	 *   array<string,string>.
+	 * - A missing file loads as an empty store.
 	 *
 	 * @return void
-	 * @throws \RuntimeException When the secret file exists but cannot be read.
-	 * @throws \UnexpectedValueException When the secret file or its contents are invalid.
+	 * @throws \RuntimeException  When the environment is invalid or the file is not readable.
+	 * @throws \UnexpectedValueException  When the path is not a regular file, or the file returns anything but a map of non-empty, unpadded string keys to string values.
 	 */
 	private function load(): void {
 		if ($this->loaded) {
@@ -166,10 +159,10 @@ class Secrets extends BaseService {
 
 
 	/**
-	 * Resolve the secret file for the active application environment.
+	 * Return the path of the store file for CITOMNI_ENVIRONMENT.
 	 *
-	 * @return string Absolute secret file path.
-	 * @throws \RuntimeException When CITOMNI_ENVIRONMENT is missing or unsupported.
+	 * @return string  var/secrets/app.secret.ENV.php under the app root, where ENV is dev, stage or prod.
+	 * @throws \RuntimeException  When CITOMNI_ENVIRONMENT is not defined or not dev, stage or prod.
 	 */
 	private function secretFile(): string {
 		if (!\defined('CITOMNI_ENVIRONMENT')) {
@@ -192,11 +185,11 @@ class Secrets extends BaseService {
 
 
 	/**
-	 * Validate a public secret lookup key without normalizing it.
+	 * Reject a key that is empty or has leading or trailing whitespace, without changing it.
 	 *
-	 * @param string $key Secret key supplied by the caller.
+	 * @param  string  $key  Key as the caller passed it.
 	 * @return void
-	 * @throws \InvalidArgumentException When the key is empty or padded with whitespace.
+	 * @throws \InvalidArgumentException  When the key is empty or padded.
 	 */
 	private function validateKey(string $key): void {
 		if ($key === '' || \trim($key) !== $key) {

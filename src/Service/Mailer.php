@@ -17,115 +17,62 @@ namespace CitOmni\Infrastructure\Service;
 
 use CitOmni\Kernel\Service\BaseService;
 use PHPMailer\PHPMailer\PHPMailer;
-// use PHPMailer\PHPMailer\Exception;
 
 /**
- * Mailer: Thin PHPMailer facade with CitOmni config and structured logging.
+ * Mailer: Service that composes and sends email through PHPMailer with the transport and defaults of cfg mail.
  *
- * Responsibilities:
- * - Provide a fluent API to compose and send emails (to/cc/bcc/replyTo/subject/body/attach).
- * - Apply transport and message defaults from app config (From, Reply-To, HTML vs text).
- * - Perform dev-friendly, structured JSON logging (optional and policy-driven).
- * - Stay lightweight: No templating engine, only simple {key} placeholder injection.
+ * Gives code a fluent API to compose one message at a time and send it over the transport
+ * that cfg mail chooses, with the sender, Reply-To and format defaults of cfg mail. The
+ * wording, templates and recipients of a message belong to the caller; the transport itself
+ * belongs to PHPMailer.
  *
- * Collaborators:
- * - Reads: $this->app->cfg->mail (transport, defaults, logging policy).
- * - Reads: $this->app->secrets key `mail.smtp.password` when SMTP auth is used.
- * - Writes: $this->app->log (mail_log.jsonl, mailer_errors.jsonl).
- * - Optional: $this->app->request (IP detection in HTTP; falls back safely in CLI).
- *
- * Configuration keys (read directly; a missing key throws \OutOfBoundsException):
- * - mail.format (string) - Default "html" or "text".
- * - mail.transport (string) - "smtp"|"sendmail"|"qmail"|"mail".
- * - mail.from.email (string) - Sender address; "" for none.
- * - mail.from.name (string) - Sender display name.
- * - mail.reply_to.email (string) - Reply-To address; "" for none.
- * - mail.reply_to.name (string) - Reply-To name.
- * - mail.sendmail_path (string) - Path for sendmail/qmail; "" uses "/usr/sbin/sendmail" or "/var/qmail/bin/sendmail".
- * - mail.smtp.host (string) - SMTP host(s), ";" separated allowed.
- * - mail.smtp.port (int) - SMTP port.
- * - mail.smtp.encryption (string|null) - "tls"|"ssl"; null or "" for none.
- * - mail.smtp.auth (bool) - Enable SMTP auth.
- * - mail.smtp.username (string) - SMTP username.
- * - Secret `mail.smtp.password` (string) - Required when SMTP auth is enabled; may be empty.
- * - mail.smtp.auto_tls (bool) - Opportunistic STARTTLS.
- * - mail.smtp.timeout (int) - Seconds before SMTP timeout.
- * - mail.smtp.keepalive (bool) - Keep the SMTP connection alive.
- * - mail.logging.log_success (bool) - Dev-only success logs.
- * - mail.logging.debug_transcript (bool) - Capture limited SMTP transcript.
- * - mail.logging.max_lines (int) - Max transcript lines.
- * - mail.logging.include_bodies (bool) - Include message bodies in logs (prod caution).
- *
- * Error handling:
- * - Fail-fast on invalid inputs (e.g., unreadable attachment/template): throws \InvalidArgumentException.
- * - Transport errors during send(): Caught locally to produce a structured error log; method returns false.
- * - No output is echoed; all diagnostics are routed to logs when enabled.
+ * Rules:
+ * - Never echo or print. Diagnostics go to the log service only.
+ * - Never log a credential.
+ * - Read the SMTP password from the secrets service only for a send, and clear it afterwards.
+ * - Leave no message state behind a send: The next message starts from the cfg defaults.
  *
  * Typical usage:
- * - Use for composing and sending transactional emails with minimal ceremony; let config drive the transport.
- *
- * Examples:
- *
- * Core:
- *   $this->app->mailer->to('user@example.com')->subject('Hi')->body('<p>Hello</p>')->send();
- *
- * Scenario (SMTP HTML with auto AltBody):
- *   $this->app->mailer->subject('Welcome')->body('<h1>Hey</h1>')->to('a@ex.tld')->send();
- *
- * Scenario (Plain text, multiple recipients):
- *   $m = $this->app->mailer->body('Ping', false)->to(['a@x.tld','b@x.tld']); $m->send();
- *
- * Scenario (Template with placeholders):
- *   $this->app->mailer->templateVars(['name'=>'Sara'])->body('Hi {name}', true)->to('u@x.tld')->send();
- *
- * Scenario (Attachment):
- *   $this->app->mailer->attach('/abs/report.pdf')->to('u@x.tld')->subject('Rpt')->body('See attached')->send();
- *
- * Scenario (Dev success logging):
- *   // Enable "mail.logging.log_success=true" in dev to capture message summaries in mail_log.jsonl
- *
- * Failure:
- * - Misconfigured SMTP or unreachable host: send() returns false and logs to mailer_errors.jsonl with safe context.
+ *   $sent = $this->app->mailer
+ *       ->to('user@example.com')
+ *       ->subject('Welcome')
+ *       ->templateVars(['name' => $name])
+ *       ->body($html)
+ *       ->send();
+ *   if (!$sent) {
+ *       $reason = $this->app->mailer->getLastErrorMessage();
+ *   }
  */
 class Mailer extends BaseService {
 
-	/** Underlying PHPMailer instance (configured in init()). */
+	/** PHPMailer instance that holds the transport settings and the message being composed. */
 	protected PHPMailer $mailer;
 
-	/**
-	 * Template variables for simple placeholder injection.
-	 * Keys are used as `{key}` in the body; values are string-cast.
-	 *
-	 * @var array<string,scalar|\Stringable>
-	 */
+	/** @var array<string,scalar|\Stringable> Values for the {key} placeholders of the next body(), cast to string. */
 	protected array $vars = [];
 
-	/** Default message format (true = HTML, false = plain text). */
+	/** Default body format: true for HTML, false for plain text. */
 	protected bool $defaultHtml = true;
 
-	/** Enable per-message JSON logging (also auto-enabled in dev environment). */
+	/** Log each sent message to mail_log.jsonl; takes effect only in the dev environment. */
 	protected bool $logEmails = false;
 
-	/**
-	 * Context of last failure from send(); null if last send() succeeded.
-	 *
-	 * @var array<string,mixed>|null
-	 */
+	/** @var array<string,mixed>|null Context of the last failed send(), or null while no send() has failed. */
 	private ?array $lastError = null;
 
 
 	/**
-	 * Lifecycle hook (called automatically if present).
+	 * Set up PHPMailer with the transport and the message defaults of cfg mail.
 	 *
 	 * Behavior:
-	 * - Instantiates PHPMailer and sets base properties (UTF-8, XMailer).
-	 * - Applies transport (SMTP/sendmail/qmail/mail) from cfg.
-	 * - Applies message defaults (From/Reply-To/format) from cfg.
-	 *
-	 * Notes:
-	 * - Keep this lightweight; no heavy I/O or long operations.
+	 * - Sends as UTF-8, with CitOmni Mailer as X-Mailer.
+	 * - Turns success logging on when cfg mail.logging.log_success is true.
+	 * - Opens no connection and reads no secret.
 	 *
 	 * @return void
+	 * @throws \UnexpectedValueException  When the transport is smtp and the removed cfg key mail.smtp.password is set, or mail.smtp.auth or mail.smtp.auto_tls is not a bool.
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects the address in cfg mail.from.email or mail.reply_to.email.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$this->mailer = new PHPMailer(true);
@@ -144,11 +91,15 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Re-apply transport and message defaults from current cfg.
+	 * Apply the transport and the message defaults of cfg mail again.
 	 *
-	 * Use this after runtime config changes to 'mail' settings.
+	 * Behavior:
+	 * - Recipients, subject, bodies and attachments composed so far stay. From is set, and the
+	 *   Reply-To addresses are replaced, when cfg mail names them.
 	 *
 	 * @return void
+	 * @throws \UnexpectedValueException  When the transport is smtp and the removed cfg key mail.smtp.password is set, or mail.smtp.auth or mail.smtp.auto_tls is not a bool.
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects the address in cfg mail.from.email or mail.reply_to.email.
 	 */
 	public function refreshConfig(): void {
 		$this->applyTransportFromCfg();
@@ -157,14 +108,16 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Apply From/Reply-To/default format from cfg.
+	 * Apply the sender, the Reply-To address and the default format of cfg mail.
 	 *
-	 * Reads:
-	 * - $this->app->cfg->mail->from->email/name
-	 * - $this->app->cfg->mail->reply_to->email/name
-	 * - $this->app->cfg->mail->format ('html'|'text')
+	 * Behavior:
+	 * - Sets From when cfg mail.from.email is not ''.
+	 * - Replaces every Reply-To address with cfg mail.reply_to when its email is not ''.
+	 * - Makes HTML the default format when cfg mail.format is html, in any letter case, and
+	 *   plain text otherwise.
 	 *
 	 * @return void
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects the address in cfg mail.from.email or mail.reply_to.email.
 	 */
 	protected function applyMessageDefaultsFromCfg(): void {
 		$mail = $this->app->cfg->mail;
@@ -188,35 +141,23 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Apply transport configuration from app cfg to PHPMailer.
+	 * Apply the transport settings of cfg mail.
 	 *
 	 * Behavior:
-	 * - Read mail.transport and switch PHPMailer mode: smtp | sendmail | qmail | mail.
-	 * - For SMTP: Set Host, Port, SMTPSecure from encryption (tls|ssl|none), SMTPAuth, and Username.
-	 * - Reject the legacy mail.smtp.password cfg key instead of silently leaving credentials in config.
-	 * - Require booleans for mail.smtp.auth and mail.smtp.auto_tls, so null cannot switch either off.
-	 * - SMTP password is deliberately not loaded here; send() resolves it lazily from Secrets.
-	 * - For SMTP: Apply operational tuning (SMTPAutoTLS, Timeout, SMTPKeepAlive).
-	 * - For sendmail/qmail: Set Sendmail binary path.
-	 * - Disable immediate debug output (SMTPDebug=0, Debugoutput is a no-op); send() handles transcript capture.
-	 *
-	 * Notes:
-	 * - Idempotent: Safe to call multiple times (used by refreshConfig()).
-	 * - Encryption policy: Unknown/empty encryption results in no implicit TLS/SSL.
-	 * - No I/O is performed; this only sets PHPMailer properties.
-	 * - Reads every key directly; a missing key throws \OutOfBoundsException. Does not validate
-	 *   credentials or reachability.
-	 *
-	 * Typical usage:
-	 *   Refresh PHPMailer after config changes or during service init().
-	 *
-	 * Failure:
-	 * - Throws when the legacy mail.smtp.password cfg key is still present.
-	 * - Throws when mail.smtp.auth or mail.smtp.auto_tls is not a boolean.
+	 * - Transport smtp, sendmail or qmail selects that transport; any other value selects PHP's
+	 *   mail().
+	 * - For SMTP: Sets host, port, encryption (tls for STARTTLS, ssl for implicit TLS, anything
+	 *   else for none), authentication with the user name, auto TLS, timeout and keepalive, and
+	 *   turns debug output off. The password stays empty until send().
+	 * - Rejects the removed cfg key mail.smtp.password, so a password left in cfg is not
+	 *   silently ignored, and requires booleans for mail.smtp.auth and mail.smtp.auto_tls, so
+	 *   null cannot turn either off.
+	 * - For sendmail and qmail: Sets the binary from cfg mail.sendmail_path, or the transport's
+	 *   standard path when it is ''.
+	 * - Applying it again gives the same state. Performs no IO.
 	 *
 	 * @return void
-	 * @throws \UnexpectedValueException When mail.smtp.password is still configured in cfg, or
-	 *                                    mail.smtp.auth or mail.smtp.auto_tls is not a boolean.
+	 * @throws \UnexpectedValueException  When the transport is smtp and mail.smtp.password is set, or mail.smtp.auth or mail.smtp.auto_tls is not a bool.
 	 */
 	protected function applyTransportFromCfg(): void {
 		$mail = $this->app->cfg->mail;
@@ -289,12 +230,12 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Return a mail cfg flag, or throw when it is not a boolean.
+	 * Return a mail cfg flag, rejecting anything but a bool.
 	 *
 	 * @param  mixed   $value  The cfg value.
 	 * @param  string  $path   Dotted cfg path, for the message.
 	 * @return bool
-	 * @throws \UnexpectedValueException  When the value is not a boolean.
+	 * @throws \UnexpectedValueException  When the value is not a bool.
 	 */
 	private static function flag(mixed $value, string $path): bool {
 		if (!\is_bool($value)) {
@@ -305,12 +246,14 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Clear current message state and re-apply message defaults.
+	 * Clear the message being composed and apply the message defaults of cfg mail again.
 	 *
-	 * Clears: Recipients (To/Cc/Bcc), Reply-Tos, attachments, custom headers,
-	 * Subject, Body, AltBody, and template vars.
+	 * Behavior:
+	 * - Clears the To, Cc and Bcc recipients, the Reply-To addresses, attachments, custom
+	 *   headers, subject, both bodies and the template variables.
 	 *
 	 * @return void
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects the address in cfg mail.from.email or mail.reply_to.email.
 	 */
 	public function resetMessage(): void {
 		$this->mailer->clearAllRecipients();
@@ -326,11 +269,12 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Set the sender (From).
+	 * Set the sender of the message.
 	 *
-	 * @param string $email Sender email address.
-	 * @param string $name  Optional display name.
-	 * @return self         Fluent self.
+	 * @param  string  $email  Sender address.
+	 * @param  string  $name  Display name; '' for none.
+	 * @return self
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects the address.
 	 */
 	public function from(string $email, string $name = ''): self {
 		$this->mailer->setFrom($email, $name);
@@ -339,16 +283,12 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Add one or more recipients (To).
+	 * Add one or more To recipients.
 	 *
-	 * Accepts:
-	 * - string email: "user@example.com"
-	 * - array of strings: ["a@example.com","b@example.com"]
-	 * - array of arrays: [["email"=>"a@example.com","name"=>"A"], ...]
-	 *
-	 * @param string|array    $email Recipient(s).
-	 * @param string|null     $name  Name used when $email is a single string.
-	 * @return self                   Fluent self.
+	 * @param  string|list<string|array{email:string,name?:string}>  $email  One address, or a list of addresses and email and name pairs.
+	 * @param  string|null  $name  Display name of every address given as a string.
+	 * @return self
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects an address.
 	 */
 	public function to(string|array $email, ?string $name = null): self {
 		foreach ((array)$email as $e) {
@@ -363,13 +303,12 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Add one or more recipients (Cc).
+	 * Add one or more Cc recipients.
 	 *
-	 * Same accepted shapes as to().
-	 *
-	 * @param string|array $email Recipient(s).
-	 * @param string|null  $name  Name used when $email is a single string.
-	 * @return self                Fluent self.
+	 * @param  string|list<string|array{email:string,name?:string}>  $email  One address, or a list of addresses and email and name pairs.
+	 * @param  string|null  $name  Display name of every address given as a string.
+	 * @return self
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects an address.
 	 */
 	public function cc(string|array $email, ?string $name = null): self {
 		foreach ((array)$email as $e) {
@@ -384,13 +323,12 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Add one or more recipients (Bcc).
+	 * Add one or more Bcc recipients.
 	 *
-	 * Same accepted shapes as to().
-	 *
-	 * @param string|array $email Recipient(s).
-	 * @param string|null  $name  Name used when $email is a single string.
-	 * @return self                Fluent self.
+	 * @param  string|list<string|array{email:string,name?:string}>  $email  One address, or a list of addresses and email and name pairs.
+	 * @param  string|null  $name  Display name of every address given as a string.
+	 * @return self
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects an address.
 	 */
 	public function bcc(string|array $email, ?string $name = null): self {
 		foreach ((array)$email as $e) {
@@ -407,11 +345,10 @@ class Mailer extends BaseService {
 	/**
 	 * Add one or more Reply-To addresses.
 	 *
-	 * Same accepted shapes as to().
-	 *
-	 * @param string|array $email Address(es).
-	 * @param string|null  $name  Name used when $email is a single string.
-	 * @return self                Fluent self.
+	 * @param  string|list<string|array{email:string,name?:string}>  $email  One address, or a list of addresses and email and name pairs.
+	 * @param  string|null  $name  Display name of every address given as a string.
+	 * @return self
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer rejects an address.
 	 */
 	public function replyTo(string|array $email, ?string $name = null): self {
 		foreach ((array)$email as $e) {
@@ -426,10 +363,10 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Set the Subject.
+	 * Set the subject of the message.
 	 *
-	 * @param string $subject Subject line.
-	 * @return self           Fluent self.
+	 * @param  string  $subject
+	 * @return self
 	 */
 	public function subject(string $subject): self {
 		$this->mailer->Subject = $subject;
@@ -438,15 +375,14 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Set the message body and format.
+	 * Set the body of the message and its format, filling in the template variables.
 	 *
 	 * Behavior:
-	 * - If $isHtml is null, uses the default format from cfg (this->defaultHtml).
-	 * - Injects template vars using {key} placeholders.
+	 * - Replaces each {key} placeholder with the template variable set before this call.
 	 *
-	 * @param string   $body   Message body (HTML or plain).
-	 * @param bool|null $isHtml True for HTML, false for plain; null = use default.
-	 * @return self            Fluent self.
+	 * @param  string  $body  HTML or plain text.
+	 * @param  bool|null  $isHtml  True for HTML, false for plain text, null for the default format of cfg mail.format.
+	 * @return self
 	 */
 	public function body(string $body, ?bool $isHtml = null): self {
 		$useHtml = $isHtml ?? $this->defaultHtml;
@@ -460,12 +396,12 @@ class Mailer extends BaseService {
 	/**
 	 * Set the plain-text alternative body.
 	 *
-	 * Notes:
-	 * - Template vars are not injected here; body($text, false) injects them into a plain-text body.
+	 * Behavior:
+	 * - Fills in no template variables; body($text, false) does that for a plain-text body.
 	 * - Without a body, send() sends this text as a text/plain message.
 	 *
-	 * @param string $altBody Text-only alternative content.
-	 * @return self           Fluent self.
+	 * @param  string  $altBody  Plain text.
+	 * @return self
 	 */
 	public function altBody(string $altBody): self {
 		$this->mailer->AltBody = $altBody;
@@ -474,14 +410,15 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Convert basic HTML into a readable plain-text representation.
+	 * Convert HTML to readable plain text.
 	 *
-	 * - Replaces <br> and common block closings with newlines.
-	 * - Strips tags and decodes entities.
-	 * - Normalizes whitespace/newlines.
+	 * Behavior:
+	 * - Turns br tags and the end tags of p, li, div and h1 to h6 into line breaks, strips
+	 *   every other tag and decodes entities.
+	 * - Collapses runs of spaces and tabs, and keeps at most one empty line in a row.
 	 *
-	 * @param string $html Source HTML.
-	 * @return string      Plain-text version.
+	 * @param  string  $html  HTML body.
+	 * @return string  Trimmed plain text.
 	 */
 	protected function htmlToPlain(string $html): string {
 		$withBreaks = \preg_replace(
@@ -499,10 +436,11 @@ class Mailer extends BaseService {
 	/**
 	 * Attach a file to the message.
 	 *
-	 * @param string      $file Absolute or relative path to a readable file.
-	 * @param string|null $name Optional override of attachment filename.
-	 * @return self              Fluent self.
-	 * @throws \InvalidArgumentException If the file is not readable.
+	 * @param  string  $file  Path of a readable file.
+	 * @param  string|null  $name  File name shown to the recipient; null for the file's own name.
+	 * @return self
+	 * @throws \InvalidArgumentException  When the file is not readable.
+	 * @throws \PHPMailer\PHPMailer\Exception  When PHPMailer refuses the path, such as a stream wrapper path.
 	 */
 	public function attach(string $file, ?string $name = null): self {
 		if (!\is_readable($file)) {
@@ -514,100 +452,35 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Send the message.
+	 * Send the message, log the outcome and reset the message state.
+	 *
+	 * A transport failure does not throw: send() returns false, logs the failure and keeps it
+	 * for getLastErrorMessage() and getLastErrorContext(). Only a failure to read the SMTP
+	 * password throws.
 	 *
 	 * Behavior:
-	 * - If only AltBody is set, forces text mode.
-	 * - If HTML is set but AltBody is empty, generates AltBody from HTML.
-	 * - Delegates to PHPMailer::send() (exceptions bubble up).
-	 * - Optionally logs a JSON summary to 'mail_log.jsonl' in dev or if logEmails(true).
-	 *
-	 * @return void
-	 * @throws \PHPMailer\PHPMailer\Exception On PHPMailer send errors.
-	 */
-/* 	 
-	public function send(): void {
-		
-		// If Body empty but AltBody present, force text mode
-		if ($this->mailer->Body === '' && $this->mailer->AltBody !== '') {
-			$this->mailer->isHTML(false);
-		}
-		
-		// Generate AltBody for HTML mails if missing
-		if ($this->mailer->isHTML() && $this->mailer->AltBody === '') {
-			$this->mailer->AltBody = $this->htmlToPlain($this->mailer->Body);
-		}
-		
-		$this->mailer->send();
-		
-		// Optional lightweight dev logging (avoid in production)
-		if ($this->logEmails && defined('CITOMNI_ENVIRONMENT') && CITOMNI_ENVIRONMENT === 'dev') {
-			$this->app->log->write(
-				'mail_log.jsonl',
-				'info',
-				'Mail sent',
-				[
-					'from'      => [$this->mailer->From, $this->mailer->FromName], // PHPMailer has a single From; logged as [address, name]
-					'to'        => \array_map(fn($a) => $a[0], $this->mailer->getToAddresses()),
-					'cc'        => \array_map(fn($a) => $a[0], $this->mailer->getCcAddresses()),
-					'bcc'       => \array_map(fn($a) => $a[0], $this->mailer->getBccAddresses()),
-					'subject'   => $this->mailer->Subject,
-					'body'      => $this->mailer->Body,
-					'altBody'   => $this->mailer->AltBody,
-					'isHtml'    => $this->mailer->isHTML(),
-					'transport'  => $this->mailer->Mailer,  // 'smtp', 'sendmail', 'qmail', 'mail'
-					'message_id' => $this->mailer->getLastMessageID(), // Useful for correlation at the MTA (Mail Transfer Agent)				
-					'timestamp' => \date('Y-m-d H:i:s'),
-					'ip'        => $this->app->request->ip(),
-					'user_agent'=> $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown',
-				]
-			);
-		}
-
-		$this->resetMessage();
-	}
-*/
-	 
-	/**
-	 * Send the prepared email with structured logging and no output.
-	 *
-	 * Behavior:
-	 * - Normalize bodies: If only AltBody is set, send it as the plain-text body; if HTML body lacks AltBody, auto-generate it.
-	 * - Capture optional SMTP transcript in memory (no echo) per mail.logging.debug_transcript and max_lines.
-	 * - Resolve `mail.smtp.password` lazily from Secrets immediately before authenticated SMTP send.
-	 * - Attempt transport send via PHPMailer::send() and measure duration.
-	 * - On success in dev and when enabled, write a summary entry to mail_log.jsonl.
-	 * - On failure, log a structured error to mailer_errors.jsonl and populate lastError.
-	 * - Always reset the message state (recipients, headers, bodies, vars) before returning.
-	 * - Never echoes debug or error text.
-	 * - DEV: Logs full structured context; SMTP transcript only if logging.debug_transcript=true (capped by max_lines).
-	 * - PROD: Logs safe context (no body content; only length + sha256) unless include_bodies=true.
-	 * - Single log entry per failure: mailer_errors.jsonl / category=error.
-	 * - Optional success log in DEV (mail_log.jsonl) when log_success=true.
-	 *
-	 * Notes:
-	 * - No echo or header writes: Safe for HTTP and CLI.
-	 * - Credentials are masked; bodies are only logged when mail.logging.include_bodies=true.
-	 * - Uses isHtmlMode() (read-only) instead of calling isHTML() with no args (setter side effect).
+	 * - A message with only a plain-text alternative body is sent as plain text with that
+	 *   text as body. An HTML body without one gets it generated from the HTML.
+	 * - For authenticated SMTP, reads the secret mail.smtp.password right before sending and
+	 *   clears it afterwards.
+	 * - A failure writes one error line to mailer_errors.jsonl with the PHPMailer error, the
+	 *   transport settings with a masked user name, the addresses, the subject and the duration,
+	 *   and:
+	 *     - the bodies when cfg mail.logging.include_bodies is true, else their lengths and SHA-256;
+	 *     - the SMTP transcript, up to mail.logging.max_lines lines, when
+	 *       mail.logging.debug_transcript is true;
+	 *     - the first 200 characters of the body without tags, in the dev environment.
+	 * - A success writes a line with the whole message to mail_log.jsonl when success logging
+	 *   is on and the environment is dev.
+	 * - Resets the message state afterwards, whatever the outcome.
 	 *
 	 * Typical usage:
-	 *   Call after composing recipients, subject, and body to dispatch a single message.
+	 *   $sent = $this->app->mailer->to($email)->altBody('Plain only')->send();
 	 *
-	 * Examples:
-	 *
-	 *   // Happy path: HTML body; AltBody auto-generated
-	 *   $ok = $this->app->mailer->to('u@x.tld')->subject('Hi')->body('<b>Hello</b>', true)->send();
-	 *
-	 *   // Edge case: Only AltBody set; sent as a text/plain message
-	 *   $ok = $this->app->mailer->to('u@x.tld')->altBody('Plain only')->send();
-	 *
-	 * Failure:
-	 * - Transport errors are caught; a structured record is logged and the method returns false.
-	 *
-	 * @return bool True if the message was accepted by the transport; false otherwise.
-	 * @throws \OutOfBoundsException When authenticated SMTP is enabled but `mail.smtp.password` is missing.
-	 * @throws \RuntimeException When the application secret store cannot be read.
-	 * @throws \UnexpectedValueException When the application secret store is invalid.
+	 * @return bool  True when the transport accepted the message.
+	 * @throws \OutOfBoundsException  When authenticated SMTP is used and the secret mail.smtp.password is missing.
+	 * @throws \RuntimeException  When the secret store cannot be read.
+	 * @throws \UnexpectedValueException  When the secret store is invalid.
 	 */
 	public function send(): bool {
 		
@@ -739,7 +612,6 @@ class Mailer extends BaseService {
 				$context['body_preview'] = $this->mbSnippet($bodyStr, 200);
 			}
 
-			// Normalize to UTF-8
 			$context = $this->utf8Normalize($context);
 
 			// Build normalized last-error-information (safe for JSON)
@@ -753,10 +625,8 @@ class Mailer extends BaseService {
 				'duration_ms' => $durationMs,
 			]);
 
-			// Log the error
 			$this->app->log->write('mailer_errors.jsonl', 'error', 'Mailer send failed', $context);
-			
-			// Tell caller that we failed...
+
 			return false;
 			
 		} finally {
@@ -767,16 +637,16 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Apply secret transport credentials immediately before sending.
+	 * Set the SMTP password from the secrets service right before a send.
 	 *
 	 * Behavior:
-	 * - Loads no secret for non-SMTP transports or when SMTP authentication is disabled.
-	 * - Resolves the SMTP password through the application Secrets service only when needed.
+	 * - Reads the secret mail.smtp.password only for SMTP with authentication; otherwise sets
+	 *   an empty password.
 	 *
 	 * @return void
-	 * @throws \OutOfBoundsException When `mail.smtp.password` is missing.
-	 * @throws \RuntimeException When the application secret store cannot be read.
-	 * @throws \UnexpectedValueException When the application secret store is invalid.
+	 * @throws \OutOfBoundsException  When the secret mail.smtp.password is missing.
+	 * @throws \RuntimeException  When the secret store cannot be read.
+	 * @throws \UnexpectedValueException  When the secret store is invalid.
 	 */
 	private function applySecretCredentials(): void {
 		if ($this->mailer->Mailer !== 'smtp' || !$this->mailer->SMTPAuth) {
@@ -789,18 +659,12 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Detect HTML body mode without mutating PHPMailer state.
-	 *
-	 * Behavior:
-	 * - Inspect PHPMailer ContentType and compare to "text/html".
-	 * - Return true when HTML mode is active; false otherwise.
-	 * - Perform a read-only check; never calls the isHTML() setter.
+	 * Tell whether the message is in HTML mode, without changing it.
 	 *
 	 * Notes:
-	 * - Avoid calling isHTML() with no args: It enables HTML mode (side effect).
-	 * - Works regardless of how Body/AltBody were assigned.
+	 * - PHPMailer's isHTML() is a setter: Called without an argument it switches HTML mode on.
 	 *
-	 * @return bool True if PHPMailer is in HTML content mode; otherwise false.
+	 * @return bool  True when the content type is text/html.
 	 */
 	private function isHtmlMode(): bool {
 		return \strcasecmp($this->mailer->ContentType, \PHPMailer\PHPMailer\PHPMailer::CONTENT_TYPE_TEXT_HTML) === 0;
@@ -808,10 +672,10 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Mask an email/username for safe logging (e.g., "jo*****@example.com").
+	 * Mask an email address or user name for a log line.
 	 *
-	 * @param string $s Non-empty email-like string.
-	 * @return string Masked representation.
+	 * @param  string  $s  Non-empty address or user name.
+	 * @return string  The first two characters, five asterisks and, for an address, @ and the domain.
 	 */
 	private function maskEmailLike(string $s): string {
 		$parts = \explode('@', $s, 2);
@@ -824,9 +688,9 @@ class Mailer extends BaseService {
 	}
 
 	/**
-	 * Collect environment metadata safely for both HTTP and CLI modes.
+	 * Return the client IP address and user agent for a log line.
 	 *
-	 * @return array{0:string,1:string} [$ip, $userAgent]
+	 * @return array{0:string,1:string}  'cli' and 'CLI' without a request service; otherwise the request's IP address, or REMOTE_ADDR or 'unknown' when that fails, and HTTP_USER_AGENT or 'Unknown'.
 	 */
 	private function envMeta(): array {
 		$ip = 'cli';
@@ -844,38 +708,20 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Normalize strings, arrays, and objects to valid UTF-8.
+	 * Convert the strings in a value to valid UTF-8 for a JSON log line.
 	 *
 	 * Behavior:
-	 * - Return strings that are already valid UTF-8 unchanged.
-	 * - Attempt CP1252 -> UTF-8 conversion; accept only if result is valid UTF-8.
-	 * - Fall back to ISO-8859-1 -> UTF-8 via mb_convert_encoding or iconv.
-	 * - If all conversions fail, strip control bytes and return a best-effort string.
-	 * - For arrays: Recursively normalize both keys (when string) and values.
-	 * - For objects: Normalize via get_object_vars() and return the normalized array.
+	 * - Valid UTF-8 passes unchanged. Another string is converted from CP1252, else from
+	 *   ISO-8859-1, else returned without ASCII control characters.
+	 * - Arrays are converted key by key and value by value, in order. An object becomes the
+	 *   array of its accessible properties, converted the same way.
+	 * - Other values pass unchanged. Conversion warnings are suppressed.
 	 *
 	 * Notes:
-	 * - No exceptions are thrown; conversion warnings are silenced intentionally.
-	 * - Objects are returned as arrays by design (safe for JSON logging).
-	 * - Order is preserved; references are not retained.
+	 * - Without mbstring, every string passes unchanged.
 	 *
-	 * Typical usage:
-	 *   Prepare log payloads or JSON-safe context that may contain mixed encodings.
-	 *
-	 * Examples:
-	 *
-	 *   // Happy path: Already UTF-8
-	 *   $clean = $this->utf8Normalize("Hello"); // "Hello"
-	 *
-	 *   // Edge: Mixed array with CP1252 fragments
-	 *   $clean = $this->utf8Normalize(["k\xA0y" => "na\xE9ve"]); // normalized keys/values
-	 *
-	 * Failure:
-	 * - None: Returns a sanitized value; invalid bytes are removed as a last resort.
-	 *
-	 * @param mixed $v Input value (string|array|object|scalar).
-	 * @return mixed  UTF-8 string, normalized array, or original scalar; objects become arrays.
-	 * @throws void   This method does not throw.
+	 * @param  mixed  $v  Value to convert.
+	 * @return mixed
 	 */
 	private function utf8Normalize(mixed $v): mixed {
 		// Fast path for strings
@@ -888,7 +734,6 @@ class Mailer extends BaseService {
 			}
 
 			// Try CP1252 first - common legacy default on some systems
-			// $converted = @\iconv('CP1252', 'UTF-8', $v);
 			$converted = @\iconv('CP1252', 'UTF-8//IGNORE', $v);
 			if ($converted !== false && (!$hasMb || \mb_check_encoding($converted, 'UTF-8'))) {
 				return $converted;
@@ -898,7 +743,6 @@ class Mailer extends BaseService {
 			if (\function_exists('mb_convert_encoding')) {
 				$converted = @\mb_convert_encoding($v, 'UTF-8', 'ISO-8859-1');
 			} else {
-				// $converted = @\iconv('ISO-8859-1', 'UTF-8', $v);
 				$converted = @\iconv('ISO-8859-1', 'UTF-8//IGNORE', $v);
 			}
 			if ($converted !== false && (!$hasMb || \mb_check_encoding($converted, 'UTF-8'))) {
@@ -931,10 +775,13 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Enable/disable JSON logging of sent emails (in addition to dev auto-logging).
+	 * Turn success logging on or off for later sends of this instance.
 	 *
-	 * @param bool $enable True to enable, false to disable.
-	 * @return self        Fluent self.
+	 * Notes:
+	 * - Success lines are written only in the dev environment.
+	 *
+	 * @param  bool  $enable
+	 * @return self
 	 */
 	public function logEmails(bool $enable = true): self {
 		$this->logEmails = $enable;
@@ -943,10 +790,13 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Set template variables for {key} placeholder injection.
+	 * Set the values for the {key} placeholders of the next body().
 	 *
-	 * @param array<string,scalar|\Stringable> $vars Key/value pairs (string-cast on injection).
-	 * @return self                                Fluent self.
+	 * Behavior:
+	 * - Replaces the variables set before. They stay until the message is reset.
+	 *
+	 * @param  array<string,scalar|\Stringable>  $vars  Values by placeholder name, cast to string.
+	 * @return self
 	 */
 	public function templateVars(array $vars): self {
 		$this->vars = $vars;
@@ -955,10 +805,10 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Inject template variables into body using {key} placeholders.
+	 * Replace the {key} placeholders of a body with the template variables.
 	 *
-	 * @param string $body Raw body (HTML or text).
-	 * @return string      Body with placeholders replaced.
+	 * @param  string  $body  HTML or plain text.
+	 * @return string
 	 */
 	protected function injectVars(string $body): string {
 		if (!$this->vars) {
@@ -973,14 +823,18 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Set message body from a template string or file.
+	 * Set the body of the message from a template file or string, with its template variables.
 	 *
-	 * @param string     $fileOrString Path to template file, or template contents (if $isFile=false).
-	 * @param array      $vars         Template variables for {key} placeholders.
-	 * @param bool       $isFile       True to load from file; false to use the string as-is.
-	 * @param bool|null  $isHtml       True=HTML, False=plain, null=use defaultHtml.
-	 * @return self                    Fluent self.
-	 * @throws \InvalidArgumentException If $isFile is true and file is not readable.
+	 * Behavior:
+	 * - Reads a template file as text; it is not executed.
+	 * - Replaces the template variables with $vars, then sets the body as body() does.
+	 *
+	 * @param  string  $fileOrString  Path of a template file, or the template itself when $isFile is false.
+	 * @param  array<string,scalar|\Stringable>  $vars  Values for the {key} placeholders, cast to string.
+	 * @param  bool  $isFile  Read $fileOrString as a path.
+	 * @param  bool|null  $isHtml  True for HTML, false for plain text, null for the default format of cfg mail.format.
+	 * @return self
+	 * @throws \InvalidArgumentException  When $isFile is true and the file is not readable.
 	 */
 	public function setTemplate(string $fileOrString, array $vars = [], bool $isFile = true, ?bool $isHtml = null): self {
 		$template = $isFile ? $this->loadTemplateFile($fileOrString) : $fileOrString;
@@ -990,11 +844,11 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Load template contents from a file.
+	 * Read a template file as text.
 	 *
-	 * @param string $filePath Absolute/relative path to a readable file.
-	 * @return string          Template contents.
-	 * @throws \InvalidArgumentException If file is not readable.
+	 * @param  string  $filePath  Path of a readable file.
+	 * @return string
+	 * @throws \InvalidArgumentException  When the file is not readable.
 	 */
 	protected function loadTemplateFile(string $filePath): string {
 		if (!\is_readable($filePath)) {
@@ -1005,9 +859,14 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Get a concise, human-readable message for the previous send() failure.
+	 * Return PHPMailer's error message of the last failed send().
 	 *
-	 * @return string|null Error message or null if last send() succeeded / not called yet.
+	 * Typical usage:
+	 *   if (!$this->app->mailer->to($email)->subject($subject)->body($html)->send()) {
+	 *       $reason = $this->app->mailer->getLastErrorMessage();
+	 *   }
+	 *
+	 * @return string|null  Null while no send() of this instance has failed.
 	 */
 	public function getLastErrorMessage(): ?string {
 		if ($this->lastError === null) {
@@ -1019,9 +878,9 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Get full structured context for the previous send() failure.
+	 * Return the context of the last failed send().
 	 *
-	 * @return array|null Associative array or null if last send() succeeded.
+	 * @return array{error_info:string,exception:array{class:string,message:string,code:int},duration_ms:int}|null  Null while no send() of this instance has failed.
 	 */
 	public function getLastErrorContext(): ?array {
 		return $this->lastError;
@@ -1029,35 +888,11 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Return a sanitized text snippet with multibyte fallback.
+	 * Return the start of a text, without HTML tags.
 	 *
-	 * Behavior:
-	 * - Strip HTML tags from input.
-	 * - Truncate to at most $len characters.
-	 * - Prefer mb_substr when available; fall back to substr.
-	 * - Do not change encoding; return a raw substring.
-	 *
-	 * Notes:
-	 * - Does not collapse whitespace; caller may normalize if needed.
-	 * - Safe for logs and previews where bodies may contain HTML.
-	 *
-	 * Typical usage:
-	 *   Produce a short, readable preview for logging or UI badges.
-	 *
-	 * Examples:
-	 *
-	 *   // HTML body preview (<= 40 chars)
-	 *   $preview = $this->mbSnippet('<p>Hello <b>world</b></p>', 40);
-	 *
-	 *   // Input shorter than limit: unchanged after strip
-	 *   $preview = $this->mbSnippet('<i>OK</i>', 200);
-	 *
-	 * Failure:
-	 * - None: Returns a string; no exceptions are thrown.
-	 *
-	 * @param string $s   Source text (may include HTML).
-	 * @param int    $len Maximum characters to keep (>= 0).
-	 * @return string     Stripped substring, length <= $len.
+	 * @param  string  $s  Text, possibly HTML.
+	 * @param  int  $len  Maximum length, >= 0; in characters, or in bytes without mbstring.
+	 * @return string  Whitespace and encoding unchanged.
 	 */
 	private function mbSnippet(string $s, int $len = 200): string {
 		if (\function_exists('mb_substr')) {
@@ -1068,9 +903,7 @@ class Mailer extends BaseService {
 
 
 	/**
-	 * Destructor: Close persistent SMTP connection if enabled and in SMTP mode.
-	 *
-	 * @return void
+	 * Close the SMTP connection that keepalive leaves open, when the service is destroyed.
 	 */
 	public function __destruct() {
 		if ($this->mailer instanceof PHPMailer && $this->mailer->SMTPKeepAlive && $this->mailer->isSMTP()) {

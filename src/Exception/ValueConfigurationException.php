@@ -15,5 +15,11 @@ declare(strict_types=1);
 
 namespace CitOmni\Infrastructure\Exception;
 
+/**
+ * ValueConfigurationException: Exception for invalid locale.format cfg of valueToSql and valueFromSql.
+ *
+ * Marks a configuration error in the app, not invalid input: Let it reach the global error
+ * handler. Fixing the value belongs to the app's cfg files.
+ */
 class ValueConfigurationException extends \RuntimeException {
 }

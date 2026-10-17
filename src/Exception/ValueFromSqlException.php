@@ -16,22 +16,36 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Structured exception for SQL -> UI/form normalization failures.
+ * ValueFromSqlException: Exception for a stored value that valueFromSql cannot format.
  *
- * Carries a stable message key and placeholder params so higher layers
- * can translate and compose user-facing field errors.
+ * Carries a stable message key with its placeholder values, so that an adapter can translate
+ * the failure and show it at the field it concerns. The message itself is a fallback for
+ * developers and logs; translating and showing it belongs to the adapter.
  *
- * Notes:
- * - $message is primarily a developer/debug fallback.
- * - $messageKey is the canonical Txt lookup key.
- * - $field is optional and is typically attached by the caller.
+ * Rules:
+ * - Keep message keys stable: Language files and callers depend on them.
  */
 class ValueFromSqlException extends \InvalidArgumentException {
 
+	/** Name of the field the failure belongs to, or null when none is named. */
 	private ?string $field;
+
+	/** Language key of the failure, such as err_value_from_sql_integer_invalid. */
 	private string $messageKey;
+
+	/** @var array<string,mixed> Values for the placeholders of the message key, keyed by placeholder name. */
 	private array $messageParams;
 
+	/**
+	 * Create the exception with its message key and placeholder values.
+	 *
+	 * @param  string  $message  Fallback message for developers and logs.
+	 * @param  string  $messageKey  Language key of the failure.
+	 * @param  array<string,mixed>  $messageParams  Values for the placeholders of the message key.
+	 * @param  string|null  $field  Name of the field the failure belongs to.
+	 * @param  int  $code  Exception code.
+	 * @param  \Throwable|null  $previous  Lower-layer cause.
+	 */
 	// Final, so that withField() can build a copy of the same class with new static.
 	final public function __construct(string $message, string $messageKey, array $messageParams = [], ?string $field = null, int $code = 0, ?\Throwable $previous = null) {
 		parent::__construct($message, $code, $previous);
@@ -40,18 +54,38 @@ class ValueFromSqlException extends \InvalidArgumentException {
 		$this->messageParams = $messageParams;
 	}
 
+	/**
+	 * Return the name of the field the failure belongs to.
+	 *
+	 * @return string|null  Null when no field is named.
+	 */
 	public function getField(): ?string {
 		return $this->field;
 	}
 
+	/**
+	 * Tell whether a non-empty field name is set.
+	 *
+	 * @return bool
+	 */
 	public function hasField(): bool {
 		return $this->field !== null && $this->field !== '';
 	}
 
+	/**
+	 * Return the language key of the failure.
+	 *
+	 * @return string  Such as err_value_from_sql_integer_invalid.
+	 */
 	public function getMessageKey(): string {
 		return $this->messageKey;
 	}
 
+	/**
+	 * Return the values for the placeholders of the message key.
+	 *
+	 * @return array<string,mixed>  Keyed by placeholder name, such as ['scale' => 2].
+	 */
 	public function getMessageParams(): array {
 		return $this->messageParams;
 	}

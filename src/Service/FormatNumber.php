@@ -1,6 +1,5 @@
 <?php
 declare(strict_types=1);
-
 /*
  * This file is part of the CitOmni framework.
  * Low overhead, high performance, ready for anything.
@@ -19,67 +18,69 @@ namespace CitOmni\Infrastructure\Service;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * FormatNumber: Strict UI <-> DB number formatter for decimal strings.
+ * FormatNumber: Service that converts decimal numbers between a comma-decimal UI format and SQL dot-decimal strings.
  *
- * Converts user-facing "continental/ISO" formats (e.g. "1.234,56" or "1 234,56")
- * into DB-ready dot-decimal strings (e.g. "1234.56"), and vice versa.
+ * Works on strings only, never floats, so a DECIMAL value keeps every digit. UI input takes a
+ * comma as decimal separator and database values a dot, and a value that does not fit is
+ * rejected instead of guessed at or rounded. The wording of the error messages belongs to
+ * the package's format_number language file.
  *
- * Behavior:
- * - No floats: All inputs/outputs are strings suitable for DECIMAL columns.
- * - Fail fast: Invalid or ambiguous formats throw \InvalidArgumentException.
- * - Strict parsing: No auto-detection; no tolerant whitespace; no rounding.
- * - Empty input handling:
- *   1) toDb(): Empty -> null (useful for optional fields / NULL columns).
- *   2) fromDb(): Empty/null -> '' (useful for rendering optional form fields).
+ * Rules:
+ * - Never round, and never pass a value through a float.
+ * - Reject a value with \InvalidArgumentException and a message from the txt service.
  *
- * Notes:
- * - UI parsing accepts only comma as decimal separator.
- * - DB parsing accepts only dot as decimal separator.
- * - Thousand separator for UI input can be '.' OR ' ' (single ASCII space), not both.
- *
- * Typical usage:
- *   $db = $this->app->formatNumber->toDb($raw, 14, 2);
- *   $ui = $this->app->formatNumber->fromDb($dbValue, 2, self::UI_THOUSANDS_DOT, self::UI_DECIMAL_COMMA);
+ * @deprecated  To be removed. The valueToSql and valueFromSql services convert decimals by cfg locale.format instead.
  */
 class FormatNumber extends BaseService {
+
+	/** Thousands separator '.' in UI values. */
 	public const UI_THOUSANDS_DOT = '.';
+
+	/** Thousands separator ' ', a plain ASCII space, in UI values. */
 	public const UI_THOUSANDS_SPACE = ' ';
+
+	/** Decimal separator ',' in UI values. */
 	public const UI_DECIMAL_COMMA = ',';
 
+	/** Decimal separator '.' in database values. */
 	public const DB_DECIMAL_DOT = '.';
 
 	/**
-	 * One-time init hook. Present for symmetry; no config/options needed.
+	 * Do nothing; the service needs no setup.
 	 *
 	 * @return void
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		// Intentionally empty. This service is pure and stateless.
 	}
 
 	/**
-	 * toDb: Convert UI number string to DB dot-decimal string.
+	 * Convert a UI number to a database dot-decimal string with exactly $scale decimals.
 	 *
 	 * Behavior:
-	 * - Accepts:
-	 *   1) "1234,56"
-	 *   2) "1.234,56"
-	 *   3) "1 234,56"
-	 *   4) "1234" / "1.234" / "1 234"
-	 * - Rejects:
-	 *   - Dot-decimal UI input like "1234.56" (ambiguous with thousands).
-	 *   - Mixed thousands separators ('.' and ' ').
-	 *   - More fractional digits than $scale (no rounding).
-	 * - Pads fractional part with trailing zeros up to $scale.
-	 * - Enforces DECIMAL($precision,$scale) digit limits.
-	 * - Empty input (null/''/whitespace) returns null.
+	 * - Returns null for null, '' and whitespace.
+	 * - Accepts an optional sign, then digits with an optional comma and decimals, with the
+	 *   thousands grouped by '.' or by ' ' in groups of three: 1234,56, 1.234,56, 1 234,56,
+	 *   1.234 and ,5 are valid.
+	 * - Rejects a dot decimal such as 1234.56, mixed or malformed grouping, any other character
+	 *   (non-breaking spaces included), more decimals than $scale, a comma at scale 0, and more
+	 *   integer digits than $precision - $scale.
+	 * - Pads the decimals with zeros to $scale, drops leading zeros of the integer part and
+	 *   drops a plus sign.
 	 *
-	 * @param string|null $raw Raw UI value from request (nullable).
-	 * @param int $precision Total digits (DECIMAL precision), must be >= 1.
-	 * @param int $scale Fractional digits (DECIMAL scale), must be >= 0 and <= $precision.
-	 * @return string|null DB-ready string or null when input is empty.
+	 * Notes:
+	 * - The messages come from the format_number language file of this package, in the active
+	 *   language.
 	 *
-	 * @throws \InvalidArgumentException On invalid/ambiguous input.
+	 * Typical usage:
+	 *   $price = $this->app->formatNumber->toDb($raw, 14, 2);
+	 *
+	 * @param  string|null  $raw  UI value; trimmed.
+	 * @param  int  $precision  Total digits of the DECIMAL column, >= 1.
+	 * @param  int  $scale  Decimals of the DECIMAL column, 0 to $precision.
+	 * @return string|null  Such as 1234.56; null for empty input.
+	 * @throws \InvalidArgumentException  When the value is rejected, or $precision or $scale is out of range.
 	 */
 	public function toDb(?string $raw, int $precision, int $scale): ?string {
 		$raw = $raw === null ? '' : \trim($raw);
@@ -194,26 +195,30 @@ class FormatNumber extends BaseService {
 	}
 
 	/**
-	 * fromDb: Convert DB dot-decimal string to UI formatted string.
+	 * Format a database dot-decimal value for the UI with exactly $scale decimals.
 	 *
 	 * Behavior:
-	 * - Accepts DB strings like: "1234.56", "-0.50", "10", "10.0".
-	 * - Rejects:
-	 *   - Thousands separators in DB input.
-	 *   - Comma decimals in DB input.
-	 *   - Non-digit characters (besides leading sign and one dot).
-	 * - Pads fractional part with zeros up to $scale for display.
-	 * - Inserts thousands separators as explicitly requested by caller.
-	 * - Empty/null input returns ''.
-	 * - If $scale > 0, always renders exactly $scale fractional digits (pads with zeros).
+	 * - Returns '' for null, '' and whitespace.
+	 * - Accepts an optional sign, then digits with an optional dot and decimals, such as
+	 *   1234.56, -0.50 or 10. Rejects thousands separators, a comma decimal, any other
+	 *   character and more decimals than $scale.
+	 * - Pads the decimals with zeros to $scale and groups the integer part by $thousandsSep.
+	 *   Drops leading zeros of the integer part and a plus sign; scale 0 has no decimal
+	 *   separator.
 	 *
-	 * @param string|null $db Raw DB value (nullable).
-	 * @param int $scale Desired UI scale (fraction digits) >= 0.
-	 * @param string $thousandsSep Thousands separator for UI output ('' | '.' | ' ').
-	 * @param string $decimalSep Decimal separator for UI output (usually ',').
-	 * @return string UI formatted value, or '' when input is empty.
+	 * Notes:
+	 * - The messages come from the format_number language file of this package, in the active
+	 *   language.
 	 *
-	 * @throws \InvalidArgumentException On invalid DB input or invalid separators.
+	 * Typical usage:
+	 *   $shown = $this->app->formatNumber->fromDb($row['price'], 2);
+	 *
+	 * @param  string|null  $db  Database value; trimmed.
+	 * @param  int  $scale  Decimals in the output, >= 0.
+	 * @param  string  $thousandsSep  '', '.' or ' '.
+	 * @param  string  $decimalSep  ',' or '.', different from $thousandsSep.
+	 * @return string  Such as 1.234,56; '' for empty input.
+	 * @throws \InvalidArgumentException  When the value is rejected, $scale is negative or a separator is not supported.
 	 */
 	public function fromDb(?string $db, int $scale = 2, string $thousandsSep = self::UI_THOUSANDS_DOT, string $decimalSep = self::UI_DECIMAL_COMMA): string {
 		$db = $db === null ? '' : \trim($db);
@@ -279,11 +284,12 @@ class FormatNumber extends BaseService {
 	}
 
 	/**
-	 * Validate DECIMAL precision/scale constraints.
+	 * Reject a DECIMAL precision or scale out of range.
 	 *
-	 * @param int $precision Total digits >= 1.
-	 * @param int $scale Fraction digits >= 0 and <= precision.
+	 * @param  int  $precision  Total digits; must be >= 1.
+	 * @param  int  $scale  Decimals; must be 0 to $precision.
 	 * @return void
+	 * @throws \InvalidArgumentException  When either is out of range.
 	 */
 	private function assertPrecisionScale(int $precision, int $scale): void {
 		if ($precision < 1) {
@@ -299,11 +305,12 @@ class FormatNumber extends BaseService {
 	}
 
 	/**
-	 * Ensure UI separators are explicitly supported.
+	 * Reject unsupported UI output separators.
 	 *
-	 * @param string $thousandsSep Allowed: '', '.', ' '.
-	 * @param string $decimalSep Allowed: ',' or '.' (caller-chosen UI).
+	 * @param  string  $thousandsSep  Must be '', '.' or ' '.
+	 * @param  string  $decimalSep  Must be ',' or '.', and differ from a non-empty $thousandsSep.
 	 * @return void
+	 * @throws \InvalidArgumentException  When a separator is not supported or both are the same.
 	 */
 	private function assertUiSeparators(string $thousandsSep, string $decimalSep): void {
 		if ($thousandsSep !== '' && $thousandsSep !== self::UI_THOUSANDS_DOT && $thousandsSep !== self::UI_THOUSANDS_SPACE) {
@@ -324,14 +331,15 @@ class FormatNumber extends BaseService {
 	}
 
 	/**
-	 * Validate thousands grouping for UI integer part.
+	 * Reject a UI integer part with malformed or mixed thousands grouping.
 	 *
-	 * Rules:
-	 * - May contain only digits plus '.' OR digits plus ' ' (not both), or digits only.
-	 * - If separator is present, grouping must be 1-3 digits then (sep + 3 digits) repeated.
+	 * Behavior:
+	 * - Accepts digits only, or a first group of one to three digits followed by groups of
+	 *   three, separated by '.' or by ' ', not both.
 	 *
-	 * @param string $intPartRaw Integer part as typed (no sign, no decimals).
+	 * @param  string  $intPartRaw  Integer part as typed, without sign and decimals.
 	 * @return void
+	 * @throws \InvalidArgumentException  When the part is empty or not accepted.
 	 */
 	private function assertThousandsGrouping(string $intPartRaw): void {
 		if ($intPartRaw === '') {
@@ -365,10 +373,10 @@ class FormatNumber extends BaseService {
 	}
 
 	/**
-	 * Strip thousands separators from a validated UI integer part.
+	 * Remove the thousands separators from a checked UI integer part.
 	 *
-	 * @param string $intPartRaw Validated integer part.
-	 * @return string Digits only.
+	 * @param  string  $intPartRaw  Integer part that assertThousandsGrouping() accepted.
+	 * @return string  Digits only.
 	 */
 	private function stripThousands(string $intPartRaw): string {
 		// Note: Input is already validated for grouping and char set.
@@ -376,11 +384,11 @@ class FormatNumber extends BaseService {
 	}
 
 	/**
-	 * Add thousands separators to a DB integer digit string.
+	 * Group a digit string by three from the right.
 	 *
-	 * @param string $digits Digits only, non-empty.
-	 * @param string $sep '', '.' or ' '.
-	 * @return string Formatted integer part.
+	 * @param  string  $digits  Digits only, non-empty.
+	 * @param  string  $sep  '', '.' or ' '; '' leaves the digits ungrouped.
+	 * @return string
 	 */
 	private function addThousands(string $digits, string $sep): string {
 		if ($sep === '') {

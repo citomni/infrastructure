@@ -19,85 +19,33 @@ use CitOmni\Kernel\App;
 use LiteMySQLi\LiteMySQLi;
 
 /**
- * BaseModelLiteMySQLi: Pragmatic base model with lazy LiteMySQLi access.
+ * BaseModelLiteMySQLi: Base model with a lazy LiteMySQLi connection.
  *
- * Responsibilities:
- * - Provide a consistent, low-overhead path to the database for models.
- *   1) Lazy-load the connection on first access (no I/O in the constructor).
- *   2) Expose `$this->db` for ergonomic calls in simple code paths.
- *   3) Expose establish() for explicit handles in hot paths.
- * - Enforce fail-fast behavior on misconfiguration or connection errors.
+ * Gives a model subclass one LiteMySQLi connection per instance, opened on first use from the
+ * db cfg and the db.password secret, for code that talks to LiteMySQLi directly instead of
+ * through the db service. The driver, its API and its failures belong to LiteMySQLi, which
+ * the app must install itself.
  *
- * Collaborators:
- * - \CitOmni\Kernel\App (read-only service locator/config access).
- * - \LiteMySQLi\LiteMySQLi (direct DB driver used for all operations).
- *
- * Configuration keys:
- * - db.host (string, required) - Database host.
- * - db.user (string, required) - Username.
- * - db.name (string, required) - Schema/database name.
- * - db.charset (string, required) - Connection charset.
- * Secrets:
- * - db.password (string, required) - Database password.
- *
- * Error handling:
- * - Fail fast; no internal try/catch. Exceptions bubble to the global handler.
- * - Missing cfg keys surface as OutOfBoundsException from the Cfg wrapper.
- *
- * Typical usage:
- * - Extend this class for DB-backed models that want zero-magic and minimal overhead.
- *
- * Examples:
- *   // Core: Simple lookup using the lazy `$this->db` handle
- *   class UserModel extends BaseModelLiteMySQLi {
- *   	public function findById(int $id): ?array {
- *   		return $this->db->fetchRow('SELECT * FROM user_account WHERE id = ?', [$id]) ?: null;
- *   	}
- *   }
- *
- *   // Scenario: Hot path loop; cache a local handle to avoid indirection
- *   $conn = $this->establish(); // direct LiteMySQLi
- *   foreach ($ids as $id) {
- *   	$row = $conn->fetchRow('SELECT * FROM user_account WHERE id = ?', [$id]);
- *   }
- *
- * Failure:
- * - Wrong credentials or unreachable host raise driver exceptions; these are not swallowed.
- *
- * Optional: Standalone
- * - Minimal bootstrap: construct App with cfg->db keys, new an anonymous class extending this base,
- *   call establish() to get the LiteMySQLi handle.
+ * Rules:
+ * - Open no connection before the first use.
+ * - Catch nothing: Cfg, secret and driver failures reach the global error handler.
  */
 abstract class BaseModelLiteMySQLi {
 
-	/** @var App Application service locator (singleton per request/process). */
+	/** Application container, for cfg and services. */
 	protected App $app;
 
-	/** @var LiteMySQLi|null Memoized DB connection (null until first establish()). */
+	/** Connection of this instance, or null until the first establish(). */
 	private ?LiteMySQLi $conn = null;
 
 
 	/**
-	 * Construct the base model and run optional subclass init().
+	 * Store the App and run the optional init() hook of the subclass.
 	 *
 	 * Behavior:
-	 * - Stores the App reference for config/service access.
-	 * - Calls init() if the subclass defines it (no I/O is performed here).
+	 * - Calls init() once, when the subclass declares it. Opens no connection.
 	 *
-	 * Notes:
-	 * - Keep init() lightweight; this constructor should remain side-effect free.
-	 *
-	 * Typical usage:
-	 *   Instantiated by controllers/services to obtain a model instance.
-	 *
-	 * Examples:
-	 *   $model = new UserModel($this->app);
-	 *
-	 * Failure:
-	 * - No expected failures; $app must be a valid App instance.
-	 *
-	 * @param App $app Application container providing cfg and services.
-	 * @return void
+	 * @param  App  $app  App whose cfg and secrets hold the connection settings.
 	 */
 	public function __construct(App $app) {
 		$this->app = $app;
@@ -110,35 +58,19 @@ abstract class BaseModelLiteMySQLi {
 
 
 	/**
-	 * Establish and memoize the LiteMySQLi connection.
+	 * Return the connection of this instance, opening it on the first call.
 	 *
 	 * Behavior:
-	 * - Returns the existing connection if already created.
-	 * - On first call, constructs LiteMySQLi using cfg->db keys and stores the handle.
+	 * - The first call connects with cfg db.host, db.user, db.name and db.charset and the
+	 *   secret db.password; later calls return the same connection.
+	 * - Connects once, without retry or reconnect.
 	 *
 	 * Notes:
-	 * - No retries or reconnect logic here; deterministic and cheap by design.
+	 * - A subclass that keeps the returned connection in a local variable saves the __get()
+	 *   call of $this->db in a hot loop.
 	 *
-	 * Typical usage:
-	 *   Use in hot paths to capture a local `$conn` for repeated operations.
-	 *
-	 * Examples:
-	 *
-	 *   // First call creates the connection; subsequent calls reuse it
-	 *   $conn = $this->establish();
-	 *   $row  = $conn->fetchRow('SELECT * FROM user_account WHERE id = ?', [$id]);
-	 *
-	 *   // Idempotent
-	 *   $a = $this->establish();
-	 *   $b = $this->establish(); // same instance as $a
-	 *
-	 * Failure:
-	 * - Missing cfg keys: OutOfBoundsException from the Cfg wrapper.
-	 * - Driver/connection errors: Exceptions thrown by LiteMySQLi.
-	 *
-	 * @return LiteMySQLi Established and ready-to-use connection.
-	 * @throws \OutOfBoundsException When required cfg->db keys are missing.
-	 * @throws \Throwable On connection/auth/charset failures from the driver.
+	 * @return LiteMySQLi
+	 * @throws \OutOfBoundsException  When one of the db cfg keys or the secret db.password is missing.
 	 */
 	protected function establish(): LiteMySQLi {
 		if ($this->conn instanceof LiteMySQLi) {
@@ -162,38 +94,20 @@ abstract class BaseModelLiteMySQLi {
 
 
 	/**
-	 * Resolve magic property "db" to the LiteMySQLi connection.
+	 * Resolve $this->db to the connection of this instance.
 	 *
 	 * Behavior:
-	 * - If `$name === 'db'`, ensures the connection exists and returns it.
-	 * - Any other property name fails fast with OutOfBoundsException.
+	 * - Opens the connection on first access.
 	 *
-	 * Notes:
-	 * - This is syntactic sugar for readability; use establish() in tight loops.
-	 *
-	 * Typical usage:
-	 *   `$this->db->fetchRow(...)` in straightforward model methods.
-	 *
-	 * Examples:
-	 *
-	 *   // Happy path
-	 *   $row = $this->db->fetchRow('SELECT * FROM user_account WHERE id = ?', [$id]);
-	 *
-	 *   // Edge: Unknown property
-	 *   // $this->foo  // throws OutOfBoundsException
-	 *
-	 * Failure:
-	 * - Unknown properties: OutOfBoundsException with the requested name.
-	 *
-	 * @param string $name Requested property name ("db" only).
-	 * @return mixed LiteMySQLi connection when $name is "db".
-	 * @throws \OutOfBoundsException If property other than "db" is requested.
+	 * @param  string  $name  Property name; only db is known.
+	 * @return mixed  The LiteMySQLi connection.
+	 * @throws \OutOfBoundsException  When $name is not db, or when establish() throws it.
+	 * @see \CitOmni\Infrastructure\Model\BaseModelLiteMySQLi::establish()  How the connection is opened.
 	 */
 	public function __get(string $name): mixed {
 		if ($name !== 'db') {
 			throw new \OutOfBoundsException("Unknown property: {$name}");
 		}
-		// Lazy resolve the DB handle and return the memoized instance
 		return $this->establish();
 	}
 

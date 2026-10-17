@@ -16,6 +16,9 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Thrown when log rotation fails.
+ * LogRotationException: Exception for a full log file that cannot be rotated.
+ *
+ * Marks a failure to move the active file aside. The entry that triggered the rotation may
+ * already have been written.
  */
 class LogRotationException extends LogFileException {}

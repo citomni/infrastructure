@@ -21,56 +21,64 @@ use CitOmni\Infrastructure\Exception\ValueFromSqlException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * ValueFromSql: Strict SQL -> UI/form value formatter for MySQL/MariaDB result values.
+ * ValueFromSql: Service that formats values read from SQL for display and for form fields.
  *
- * Converts raw SQL column values (typically strings/ints from mysqli/mysqlnd) into
- * locale-aware UI strings suitable for HTML output and form field population.
+ * Turns what mysqli returns for a MySQL or MariaDB column into the string that a page shows
+ * or a form field takes: Numbers follow cfg locale.format, dates and times the formats that
+ * HTML inputs accept. A stored value that it cannot read exactly is rejected rather than
+ * guessed at, because it points at bad data. Reading the values belongs to the Repositories,
+ * and escaping them for HTML belongs to the templates.
  *
- * Core rules:
- * - Fail fast on invalid or unexpected SQL values (no guessing, no silent coercion).
- * - Deterministic and cfg-strict locale policy for numbers:
- *   - decimal separator: cfg locale.format.decimal_separator (required, exactly 1 char)
- *   - thousand separator: cfg locale.format.thousand_separator (required, '' or exactly 1 char)
- *   - group thousands: cfg locale.format.group_thousands (required, bool)
- * - Deterministic and cfg-strict decimal policy:
- *   - default scale: cfg locale.format.decimal_scale (required, 0..18)
- *   - rounding mode: cfg locale.format.decimal_string_rounding (required, one of: "fail", "truncate", "half_up")
- *   - trim trailing zeros: cfg locale.format.decimal_trim_trailing_zeros (required, bool)
- *
- * HTML form helpers:
- * - date(): Returns a value suitable for <input type="date">:
- *   - "YYYY-MM-DD" (SQL DATE) validated and passed through.
- * - time(): Returns a value suitable for <input type="time">:
- *   - "HH:MM" or "HH:MM:SS" depending on cfg locale.format.time_include_seconds (required, bool).
- * - dateTimeLocal(): Returns a value suitable for <input type="datetime-local">:
- *   - "YYYY-MM-DDTHH:MM" or "YYYY-MM-DDTHH:MM:SS" depending on cfg locale.format.datetime_local_include_seconds (required, bool).
- *
- * Notes:
- * - SQL numeric input for decimals must be dot-decimal ('.') with optional leading sign.
- *   Thousand separators are not allowed in SQL input.
- * - BIGINT integers may arrive as strings; integer formatting works on digits as strings to avoid overflow.
- *
- * @throws ValueFromSqlException On invalid SQL values.
- * @throws ValueConfigurationException On invalid locale configuration.
- * @throws ValueDefinitionException On invalid method arguments or unsupported formatting rules.
+ * Rules:
+ * - Never guess or cast silently: A value that does not match exactly is rejected with
+ *   ValueFromSqlException, whose message key names the reason.
+ * - Treat a missing value as null, or as ValueFromSqlException when required is true.
+ * - Report an invalid rule from the calling code as ValueDefinitionException, never as
+ *   ValueFromSqlException.
+ * - Format numbers digit by digit, so BIGINT and DECIMAL strings keep every digit.
  */
 class ValueFromSql extends BaseService {
 
+	/** Rounding mode that rejects nonzero digits beyond the scale. */
 	private const ROUND_FAIL = 'fail';
+
+	/** Rounding mode that drops the digits beyond the scale. */
 	private const ROUND_TRUNCATE = 'truncate';
+
+	/** Rounding mode that rounds half up at the scale. */
 	private const ROUND_HALF_UP = 'half_up';
 
+	/** Decimal separator of cfg locale.format.decimal_separator. */
 	private string $decimalSeparator = ',';
+
+	/** Thousand separator of cfg locale.format.thousand_separator, or '' for none. */
 	private string $thousandSeparator = '.';
+
+	/** Whether to group thousands by default; cfg locale.format.group_thousands. */
 	private bool $groupThousands = true;
 
+	/** Default number of decimals, 0-18; cfg locale.format.decimal_scale. */
 	private int $decimalScale = 2;
+
+	/** Default rounding mode, one of the ROUND_* values; cfg locale.format.decimal_string_rounding. */
 	private string $decimalStringRounding = self::ROUND_FAIL;
+
+	/** Whether to drop trailing zeros of the decimals by default; cfg locale.format.decimal_trim_trailing_zeros. */
 	private bool $decimalTrimTrailingZeros = false;
 
+	/** Whether time() includes seconds by default; cfg locale.format.time_include_seconds. */
 	private bool $timeIncludeSeconds = false;
+
+	/** Whether dateTimeLocal() includes seconds by default; cfg locale.format.datetime_local_include_seconds. */
 	private bool $dateTimeLocalIncludeSeconds = false;
 
+	/**
+	 * Read and check cfg locale.format once.
+	 *
+	 * @return void
+	 * @throws \CitOmni\Infrastructure\Exception\ValueConfigurationException  When decimal_separator is not one byte, thousand_separator is neither '' nor one byte or equals decimal_separator, decimal_scale is not an int from 0 to 18, decimal_string_rounding is not fail, truncate or half_up, or one of the four flags is not a bool.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
+	 */
 	protected function init(): void {
 		// Package-owned cfg: Assumes the Registry baseline for locale.format, so no isset() guard.
 		$format = $this->app->cfg->locale->format;
@@ -136,25 +144,25 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Format a SQL integer value as a locale-grouped display string.
-	 *
-	 * Accepts:
-	 * - int
-	 * - string: optional leading sign, then digits only (No separators)
+	 * Format a stored integer for display, with thousands grouped.
 	 *
 	 * Behavior:
-	 * - null -> null (unless required=true)
-	 * - "" after trim -> null (unless required=true)
-	 * - Leading zeros are stripped ("007" -> "7")
-	 * - "-0" is normalized to "0"
-	 * - Thousand grouping uses cfg locale.format.group_thousands and locale.format.thousand_separator
+	 * - Accepts an int, or a string of digits with an optional sign, such as a BIGINT that
+	 *   mysqli returns as a string. Rejects separators, any other character, and a bool, float,
+	 *   array or object.
+	 * - Drops leading zeros and a plus sign; -0 becomes 0.
+	 * - Groups thousands by the thousand separator of cfg, unless grouping is off or the
+	 *   separator is ''.
+	 * - Returns null for null and for a string that is empty after trimming.
 	 *
-	 * @param mixed $value SQL value (int|string|null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @param bool|null $groupThousands Override grouping (Default null = cfg).
-	 * @return string|null UI formatted integer string or null.
+	 * Typical usage:
+	 *   $visits = $this->app->valueFromSql->integer($row['visits']);
 	 *
-	 * @throws ValueFromSqlException On invalid type/format or when required=true and empty.
+	 * @param  mixed  $value  Stored value: int, string or null.
+	 * @param  bool  $required  Reject a missing value instead of returning null.
+	 * @param  bool|null  $groupThousands  Group thousands; null for cfg locale.format.group_thousands.
+	 * @return string|null  Such as 1.234.567.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is rejected, or missing while required.
 	 */
 	public function integer(mixed $value, bool $required = false, ?bool $groupThousands = null): ?string {
 
@@ -213,35 +221,33 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Format a SQL dot-decimal value as a locale-formatted UI decimal string.
+	 * Format a stored decimal for display, with the separators and scale of cfg.
 	 *
-	 * Input contract:
-	 * - SQL decimals are dot-decimal strings: "1234.56" (optional leading sign).
-	 * - No thousand separators are allowed in SQL input.
+	 * Behavior:
+	 * - Accepts a dot-decimal string with an optional sign, such as -1234.5 or .5, an int, or
+	 *   a float. Rejects thousand separators, a comma decimal, exponent notation, and a bool,
+	 *   array or object.
+	 * - Pads the decimals with zeros to the scale. Zeros beyond the scale are dropped first, so
+	 *   the rounding mode only meets nonzero digits beyond it: fail rejects them, truncate
+	 *   drops them and half_up rounds. At scale 2, 1.500 gives 1,50, while fail rejects 1.505.
+	 * - A float is rounded half up to the scale, whatever the rounding mode; prefer strings.
+	 * - With trimming on, drops trailing zeros of the decimals, and the decimal separator when
+	 *   none remain: 1.234,50 becomes 1.234,5 and 1.234,00 becomes 1.234.
+	 * - Groups thousands as integer() does. Returns no plus sign and no negative zero.
+	 * - Returns null for null and for a string that is empty after trimming.
 	 *
-	 * Decimal policy is cfg-driven and strict:
-	 * - scale default: cfg locale.format.decimal_scale
-	 * - rounding mode: cfg locale.format.decimal_string_rounding ("fail"|"truncate"|"half_up")
-	 *   zeros beyond the scale are dropped first, so "fail" only fails when a digit other than zero
-	 *   would be lost (e.g. "1.500" -> "1,50" at scale 2, while "1.505" fails).
-	 * - trim zeros: cfg locale.format.decimal_trim_trailing_zeros
-	 *   when enabled, output may drop trailing zeros and may remove the decimal separator entirely
-	 *   (e.g. "1.234,50" -> "1.234,5" and "1.234,00" -> "1.234").
-	 * - grouping: cfg locale.format.group_thousands
+	 * Typical usage:
+	 *   $price = $this->app->valueFromSql->decimal($row['price']);
 	 *
-	 * Notes:
-	 * - float inputs are always rounded HALF_UP (cfg rounding applies to string inputs only)
-	 *
-	 * @param mixed $value SQL value (string|int|float|null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @param int|null $scale Override scale (Default null = cfg).
-	 * @param bool|null $groupThousands Override grouping (Default null = cfg).
-	 * @param bool|null $trimTrailingZeros Override trim policy (Default null = cfg).
-	 * @param string|null $rounding Override rounding mode (Default null = cfg).
-	 * @return string|null Locale-formatted decimal string or null.
-	 *
-	 * @throws ValueFromSqlException On invalid type, invalid SQL format, or policy violations.
-	 * @throws ValueDefinitionException On invalid override arguments.
+	 * @param  mixed  $value  Stored value: string, int, float or null.
+	 * @param  bool  $required  Reject a missing value instead of returning null.
+	 * @param  int|null  $scale  Decimals in the output, 0-18; null for cfg locale.format.decimal_scale.
+	 * @param  bool|null  $groupThousands  Group thousands; null for cfg locale.format.group_thousands.
+	 * @param  bool|null  $trimTrailingZeros  Drop trailing zeros of the decimals; null for cfg locale.format.decimal_trim_trailing_zeros.
+	 * @param  string|null  $rounding  fail, truncate or half_up; null for cfg locale.format.decimal_string_rounding.
+	 * @return string|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is rejected, the rounding mode fail meets nonzero digits beyond the scale, or the value is missing while required; a too many decimals failure carries scale.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueDefinitionException  When $scale is outside 0-18 or $rounding is not one of the modes.
 	 */
 	public function decimal(mixed $value, bool $required = false, ?int $scale = null, ?bool $groupThousands = null, ?bool $trimTrailingZeros = null, ?string $rounding = null): ?string {
 
@@ -324,19 +330,20 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Convert a SQL boolean-ish value to a PHP bool or null.
+	 * Convert a stored boolean to a PHP bool.
 	 *
-	 * Accepts:
-	 * - null
-	 * - bool
-	 * - int: 0/1
-	 * - string: "0"/"1"
+	 * Behavior:
+	 * - Accepts true and false, the ints 1 and 0, and the strings 1 and 0. Rejects every other
+	 *   value and type.
+	 * - Returns null for null and for a string that is empty after trimming.
 	 *
-	 * @param mixed $value SQL value.
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return bool|null Bool or null.
+	 * Typical usage:
+	 *   $active = $this->app->valueFromSql->boolean($row['active'], required: true);
 	 *
-	 * @throws ValueFromSqlException On invalid type/value or when required=true and empty.
+	 * @param  mixed  $value  Stored value: bool, int, string or null; a string is trimmed.
+	 * @param  bool  $required  Reject a missing value instead of returning null.
+	 * @return bool|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is rejected, or missing while required.
 	 */
 	public function boolean(mixed $value, bool $required = false): ?bool {
 
@@ -383,30 +390,28 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Validate and format a SQL DATE value for output.
+	 * Check a stored date and format it for a date field or for display.
 	 *
-	 * Default output is "YYYY-MM-DD", which is the format required by
-	 * HTML <input type="date">. Use $format to request a different layout
-	 * when the value is destined for display rather than a form field.
-	 *
-	 * Supported formats:
-	 * - 'YYYY-MM-DD' -> "2026-02-26"  (default; HTML input type="date")
-	 * - 'DD-MM-YYYY' -> "26-02-2026"  (European display)
-	 * - 'DD/MM/YYYY' -> "26/02/2026"
-	 * - 'MM/DD/YYYY' -> "02/26/2026"  (US display)
+	 * Behavior:
+	 * - Accepts YYYY-MM-DD with a date that exists; anything else, a DATETIME included, is
+	 *   rejected.
+	 * - Returns YYYY-MM-DD, the value that input type="date" takes, by default, and
+	 *   DD-MM-YYYY, DD/MM/YYYY or MM/DD/YYYY on request.
+	 * - Returns null for null and for a string that is empty after trimming.
 	 *
 	 * Notes:
-	 * - For display formats beyond the above (e.g. "26. februar 2026"), use the
-	 *   template's $dt() helper or PHP's IntlDateFormatter instead.
+	 * - Other display formats, such as with month names, belong to the template or to
+	 *   IntlDateFormatter.
 	 *
-	 * @param mixed $value SQL value (string|null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @param string $format Output format token (Default 'YYYY-MM-DD').
-	 * @return string|null Formatted date string or null.
+	 * Typical usage:
+	 *   $movedIn = $this->app->valueFromSql->date($row['moved_in']);
 	 *
-	 * @throws ValueFromSqlException On non-string input, invalid SQL date,
-	 *                               or when required=true and value is null/empty.
-	 * @throws ValueDefinitionException On unsupported output format.
+	 * @param  mixed  $value  Stored value: string or null; trimmed.
+	 * @param  bool  $required  Reject a missing value instead of returning null.
+	 * @param  string  $format  YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY or MM/DD/YYYY.
+	 * @return string|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is not a string, not a date that exists, or missing while required.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueDefinitionException  When $format is not supported.
 	 */
 	public function date(mixed $value, bool $required = false, string $format = 'YYYY-MM-DD'): ?string {
 
@@ -436,26 +441,22 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Validate and format SQL TIME for HTML <input type="time">.
+	 * Check a stored time of day and format it for input type="time".
 	 *
-	 * Input accepts:
-	 * - "HH:MM"
-	 * - "HH:MM:SS"
+	 * Behavior:
+	 * - Accepts HH:MM or HH:MM:SS within 00:00:00 to 23:59:59. Rejects fractional seconds, and
+	 *   a TIME value outside one day, such as 25:00:00 or a negative one.
+	 * - Returns HH:MM:SS when seconds are included, and HH:MM otherwise.
+	 * - Returns null for null and for a string that is empty after trimming.
 	 *
-	 * Output precision is cfg-driven by default (cfg locale.format.time_include_seconds),
-	 * but may be overridden per call via $includeSeconds when different fields on the
-	 * same page require different precision.
+	 * Typical usage:
+	 *   $startTime = $this->app->valueFromSql->time($row['start_time']);
 	 *
-	 * - false -> "HH:MM"
-	 * - true  -> "HH:MM:SS"
-	 *
-	 * @param mixed $value SQL value (string|null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @param bool|null $includeSeconds Override cfg precision (Default null = use cfg).
-	 * @return string|null HTML time string or null.
-	 *
-	 * @throws ValueFromSqlException On non-string input, invalid SQL time,
-	 *                               or when required=true and value is null/empty.
+	 * @param  mixed  $value  Stored value: string or null; trimmed.
+	 * @param  bool  $required  Reject a missing value instead of returning null.
+	 * @param  bool|null  $includeSeconds  Include seconds; null for cfg locale.format.time_include_seconds.
+	 * @return string|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is not a string, not a time of day, or missing while required.
 	 */
 	public function time(mixed $value, bool $required = false, ?bool $includeSeconds = null): ?string {
 
@@ -481,26 +482,22 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Validate and format SQL DATETIME for HTML <input type="datetime-local">.
+	 * Check a stored date and time and format it for input type="datetime-local".
 	 *
-	 * Input accepts:
-	 * - "YYYY-MM-DD HH:MM"
-	 * - "YYYY-MM-DD HH:MM:SS"
+	 * Behavior:
+	 * - Accepts YYYY-MM-DD HH:MM or YYYY-MM-DD HH:MM:SS with a date that exists and a time of
+	 *   day; rejects fractional seconds.
+	 * - Returns YYYY-MM-DDTHH:MM:SS when seconds are included, and YYYY-MM-DDTHH:MM otherwise.
+	 * - Returns null for null and for a string that is empty after trimming.
 	 *
-	 * Output precision is cfg-driven by default (cfg locale.format.datetime_local_include_seconds),
-	 * but may be overridden per call via $includeSeconds when different fields on the
-	 * same page require different precision.
+	 * Typical usage:
+	 *   $startsAt = $this->app->valueFromSql->dateTimeLocal($row['starts_at']);
 	 *
-	 * - false -> "YYYY-MM-DDTHH:MM"
-	 * - true  -> "YYYY-MM-DDTHH:MM:SS"
-	 *
-	 * @param mixed $value SQL value (string|null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @param bool|null $includeSeconds Override cfg precision (Default null = use cfg).
-	 * @return string|null HTML datetime-local string or null.
-	 *
-	 * @throws ValueFromSqlException On non-string input, invalid SQL datetime,
-	 *                               or when required=true and value is null/empty.
+	 * @param  mixed  $value  Stored value: string or null; trimmed.
+	 * @param  bool  $required  Reject a missing value instead of returning null.
+	 * @param  bool|null  $includeSeconds  Include seconds; null for cfg locale.format.datetime_local_include_seconds.
+	 * @return string|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is not a string, not a date and time that exist, or missing while required.
 	 */
 	public function dateTimeLocal(mixed $value, bool $required = false, ?bool $includeSeconds = null): ?string {
 
@@ -532,33 +529,24 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Return a SQL text value as-is (null-safe).
-	 *
-	 * This method intentionally does NOT trim whitespace.
-	 * A VARCHAR/TEXT column may contain leading/trailing whitespace by design,
-	 * legacy data, imports, or manual SQL operations. ValueFromSql preserves
-	 * the stored value exactly.
+	 * Return a stored text unchanged.
 	 *
 	 * Behavior:
-	 * - null:
-	 *   1) required=false -> null
-	 *   2) required=true  -> throws
-	 * - string:
-	 *   - "" (empty string):
-	 *     1) required=false -> null
-	 *     2) required=true  -> throws
-	 *   - "   " (whitespace-only) is considered a valid stored value and is returned as-is.
+	 * - Never trims: Leading and trailing whitespace may belong to the stored value, so a
+	 *   string of only whitespace is returned as it is.
+	 * - Returns null for null and for ''.
 	 *
 	 * Notes:
-	 * - This is not symmetric with ValueToSql::text(), which may trim UI input.
-	 *   If you want trimmed output for form fields, trim explicitly at the call site
-	 *   or introduce a dedicated method (e.g. textTrimmed()) to make that policy explicit.
+	 * - ValueToSql::text() trims by default, so the two are not symmetric. Trim at the call
+	 *   site when a form field needs it.
 	 *
-	 * @param mixed $value SQL value (string|null).
-	 * @param bool $required Whether null/empty string is allowed (Default false).
-	 * @return string|null Raw string or null.
+	 * Typical usage:
+	 *   $title = $this->app->valueFromSql->text($row['title'], required: true);
 	 *
-	 * @throws ValueFromSqlException On non-string input, or when required=true and value is null/empty string.
+	 * @param  mixed  $value  Stored value: string or null.
+	 * @param  bool  $required  Reject null and '' instead of returning null.
+	 * @return string|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is not a string, or null or '' while required.
 	 */
 	public function text(mixed $value, bool $required = false): ?string {
 
@@ -585,13 +573,20 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Decode SQL JSON (string) to array.
+	 * Decode a stored JSON array or object.
 	 *
-	 * @param mixed $value SQL value (string|null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return array|null Decoded array or null.
+	 * Behavior:
+	 * - Decodes objects to associative arrays. Rejects JSON that is no array or object, such as
+	 *   a number, a string or null.
+	 * - Returns null for null and for a string that is empty after trimming.
 	 *
-	 * @throws ValueFromSqlException On invalid JSON, invalid type, or when required=true and empty.
+	 * Typical usage:
+	 *   $settings = $this->app->valueFromSql->json($row['settings']) ?? [];
+	 *
+	 * @param  mixed  $value  Stored value: string or null.
+	 * @param  bool  $required  Reject a missing value instead of returning null.
+	 * @return array<array-key,mixed>|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the value is not a string, not a JSON array or object, or missing while required.
 	 */
 	public function json(mixed $value, bool $required = false): ?array {
 
@@ -629,13 +624,15 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Require a trimmed string or null.
+	 * Return a stored value as a trimmed string, or null when it is missing.
 	 *
-	 * @param mixed $value SQL value.
-	 * @param string $invalidKey Message key used when the value type is invalid.
-	 * @return string|null Trimmed string or null.
+	 * Behavior:
+	 * - Accepts an int as its digits, because mysqlnd may return a numeric column as int.
 	 *
-	 * @throws ValueFromSqlException When $value is not a supported string/int source.
+	 * @param  mixed  $value  Stored value.
+	 * @param  string  $invalidKey  Message key when the type is neither null, int nor string.
+	 * @return string|null  Null for null and for a string that is empty after trimming.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the type is neither null, int nor string.
 	 */
 	private function requireTrimmedStringOrNull(mixed $value, string $invalidKey): ?string {
 
@@ -659,12 +656,11 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Parse and validate SQL DATE "YYYY-MM-DD".
+	 * Parse a SQL date YYYY-MM-DD with a date that exists.
 	 *
-	 * @param string $s Trimmed date string.
-	 * @return array{int,int,int} [y, m, d]
-	 *
-	 * @throws ValueFromSqlException On invalid SQL date format or invalid calendar date.
+	 * @param  string  $s  Trimmed date.
+	 * @return array{0:int,1:int,2:int}  Year, month and day.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the format is invalid or the date does not exist.
 	 */
 	private function parseSqlDate(string $s): array {
 
@@ -686,24 +682,17 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Parse a SQL dot-decimal string into sign + digit parts.
+	 * Parse a SQL dot-decimal string into sign, integer digits and decimals.
 	 *
-	 * Accepted input:
-	 * - "123"
-	 * - "123.45"
-	 * - "-123.45"
-	 * - "+123.45" (normalized to no '+')
-	 * - ".5" (normalized to "0.5")
+	 * Behavior:
+	 * - Accepts 123, 123.45, -123.45, +123.45 and .5. Drops a plus sign and the leading zeros
+	 *   of the integer part, and turns a missing integer part into 0.
+	 * - Rejects thousand separators, a comma decimal and exponent notation.
+	 * - A negative value that is zero loses its sign.
 	 *
-	 * Rejected:
-	 * - Thousand separators
-	 * - Locale decimal separators
-	 * - Scientific notation
-	 *
-	 * @param string $s Trimmed non-empty string.
-	 * @return array{sign:string,int:string,frac:string} Parsed parts.
-	 *
-	 * @throws ValueFromSqlException On invalid SQL decimal format.
+	 * @param  string  $s  Trimmed, non-empty input.
+	 * @return array{sign:string,int:string,frac:string}  sign is '' or '-'; frac may be ''.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the format is invalid.
 	 */
 	private function parseSqlDotDecimal(string $s): array {
 
@@ -766,14 +755,13 @@ class ValueFromSql extends BaseService {
 	 *   cuts them off, "half_up" rounds on the first of them.
 	 * - A shorter fraction is padded with zeros, and negative zero becomes zero.
 	 *
-	 * @param string $sign '' or '-'.
-	 * @param string $intDigits Digits-only integer part (>=1 char).
-	 * @param string $fracDigits Digits-only fraction part (may be '').
-	 * @param int $scale 0..18.
-	 * @param string $rounding One of: "fail", "truncate", "half_up".
-	 * @return array{string,string,string} [$intDigits, $fracDigits, $sign]
-	 *
-	 * @throws ValueFromSqlException On rounding-policy violations for SQL data.
+	 * @param  string  $sign  '' or '-'.
+	 * @param  string  $intDigits  Integer digits, at least one.
+	 * @param  string  $fracDigits  Decimal digits; may be ''.
+	 * @param  int  $scale  0-18.
+	 * @param  string  $rounding  fail, truncate or half_up.
+	 * @return array{0:string,1:string,2:string}  Integer digits, decimals and sign.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the mode is fail and nonzero digits remain beyond the scale.
 	 */
 	private function applyScalePolicy(string $sign, string $intDigits, string $fracDigits, int $scale, string $rounding): array {
 
@@ -883,10 +871,10 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Add one to a digits-only integer string.
+	 * Add one to a string of digits.
 	 *
-	 * @param string $digits Digits-only string (>=1 char).
-	 * @return string Digits-only string, incremented by 1.
+	 * @param  string  $digits  Digits only, at least one.
+	 * @return string  Digits only, without leading zeros.
 	 */
 	private function addOneToDigits(string $digits): string {
 
@@ -916,11 +904,11 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Group digits with a thousand separator (digits-only input).
+	 * Group a string of digits by three from the right.
 	 *
-	 * @param string $digits Digits-only string.
-	 * @param string $sep Thousand separator, exactly 1 char.
-	 * @return string Grouped string.
+	 * @param  string  $digits  Digits only.
+	 * @param  string  $sep  Thousand separator, one byte.
+	 * @return string
 	 */
 	private function groupThousandsDigits(string $digits, string $sep): string {
 
@@ -944,12 +932,11 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Parse a wall-clock SQL TIME string "HH:MM" or "HH:MM:SS".
+	 * Parse a time of day HH:MM or HH:MM:SS.
 	 *
-	 * @param string $s Trimmed time string.
-	 * @return array{int,int,int} [hh, mm, ss]
-	 *
-	 * @throws ValueFromSqlException On invalid SQL time format or invalid time value.
+	 * @param  string  $s  Trimmed time.
+	 * @return array{0:int,1:int,2:int}  Hours, minutes and seconds; seconds are 0 when missing.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueFromSqlException  When the format is invalid or the time is outside 00:00:00 to 23:59:59.
 	 */
 	private function parseSqlWallClockTime(string $s): array {
 
@@ -972,16 +959,17 @@ class ValueFromSql extends BaseService {
 
 
 	/**
-	 * Assemble locale-formatted decimal output from validated parts.
+	 * Join checked decimal parts with the separators of cfg.
 	 *
-	 * Applies thousand grouping to the integer part and joins with the cfg
-	 * decimal separator. Emits no decimal separator when $fracDigits is empty.
+	 * Behavior:
+	 * - Groups the integer part when $groupThousands is true and the thousand separator is not
+	 *   ''. Adds no decimal separator when there are no decimals.
 	 *
-	 * @param string $sign '' or '-'.
-	 * @param string $intDigits Digit-only integer part (no leading zeros unless "0").
-	 * @param string $fracDigits Digit-only fractional part (may be '' when scale=0 or trimmed).
-	 * @param bool $groupThousands Whether to apply cfg thousand grouping.
-	 * @return string Locale-formatted decimal string.
+	 * @param  string  $sign  '' or '-'.
+	 * @param  string  $intDigits  Integer digits without leading zeros, or 0.
+	 * @param  string  $fracDigits  Decimal digits; may be ''.
+	 * @param  bool  $groupThousands  Group the integer part.
+	 * @return string
 	 */
 	private function assembleDecimalParts(string $sign, string $intDigits, string $fracDigits, bool $groupThousands): string {
 

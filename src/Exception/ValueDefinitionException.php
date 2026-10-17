@@ -16,17 +16,12 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Exception for invalid normalization rule definitions or invalid caller arguments.
+ * ValueDefinitionException: Exception for an invalid rule that code passes to valueToSql or valueFromSql.
  *
- * Used when the caller passes an invalid method contract such as:
- * - reversed min/max bounds
- * - invalid decimal scale
- * - invalid maxLen
- * - invalid enum allowed list
- *
- * Notes:
- * - This is a developer-side error, not a user input validation error.
- * - Higher layers should normally not convert this into field-level user feedback.
+ * Marks an error in the calling code, such as reversed bounds, a scale out of range, a
+ * negative maximum length, an invalid list of allowed values or an unsupported output format,
+ * as opposed to invalid input from a user. It is not field feedback; let it reach the global
+ * error handler.
  */
 class ValueDefinitionException extends \LogicException {
 }

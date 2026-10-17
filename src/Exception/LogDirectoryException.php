@@ -16,6 +16,9 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Thrown when the configured log directory is invalid or unusable.
+ * LogDirectoryException: Exception for a log directory that is empty, missing, cannot be created or is not writable.
+ *
+ * Narrows LogConfigException to the directory, so that a caller can tell a filesystem
+ * problem, such as a missing permission, from an invalid value.
  */
 class LogDirectoryException extends LogConfigException {}

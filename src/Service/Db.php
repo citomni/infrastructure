@@ -21,108 +21,100 @@ use CitOmni\Infrastructure\Exception\DbQueryException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Db: MySQLi database service with lazy connection, prepared statements, and bounded statement cache.
+ * Db: Service that runs MySQL and MariaDB statements through mysqli with prepared statements.
  *
- * Wraps MySQLi directly: no ORM, no query builder, no hidden state.
- * The physical connection is deferred until first use. Non-secret configuration
- * is read and validated eagerly in init(); the password is resolved lazily from
- * the configured Secrets key only when a connection is opened.
+ * The one connection per request or process that Repositories run their SQL on, opened on
+ * first use. It binds values to the placeholders of the SQL it is given and offers small
+ * helpers for single-table writes; it builds no other queries and maps no objects. Which SQL
+ * runs belongs to the Repositories.
  *
- * Behavior:
- * - mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT) is set in init(). This is a
- *   global driver flag; it affects all mysqli operations in the process for the request lifetime.
- * - Connection is lazy; opened on first getConnection() call.
- * - Manual connection recovery is available via checkConnection(), ensureConnection(), and reconnect().
- * - Statement cache is bounded (FIFO eviction). Set limit to 0 to disable.
- * - All queries use positional ? placeholders. Types are auto-detected.
- * - Errors surface as DbConnectException (connection/session) or DbQueryException (queries).
- *   Both extend DbException for catch-all DB-layer error handling.
- *
- * Notes:
- * - select() and its dependents require mysqlnd. For mysqlnd-free streaming use selectNoMysqlnd().
- * - insertBatch() owns its own transaction in the chunked fallback. Do not call from within
- *   an active transaction; wrap the outer operation instead.
- * - Database password is read from the $app->secrets key that `password_secret` names.
- *   The secret value is never retained on the service.
- *
- * Config node: $app->cfg->db; a service option that is not null overrides the key
- *   host, user, name                     (non-empty strings)
- *   charset                              (non-empty string)
- *   port                                 (1-65535)
- *   socket                               (null or '' for the mysqli default: the default
- *                                         socket for host localhost, TCP otherwise)
- *   connect_timeout                      (seconds, >= 1)
- *   password_secret                      (Secrets key of the password)
- *   sql_mode                             (explicit session sql_mode; null or '' for none)
- *   timezone                             (explicit session time_zone; null or '' derives the
- *                                         UTC offset from PHP's active timezone)
- *   statement_cache_limit                (int >= 0; 0 disables caching)
- *
- * Typical usage:
- *   $row = $this->app->db->fetchRow('SELECT id, email FROM users WHERE id = ?', [$userId]);
- *
- * @throws \CitOmni\Infrastructure\Exception\DbConnectException On connection or session init failures.
- * @throws \CitOmni\Infrastructure\Exception\DbQueryException   On query prepare, bind, or execute failures.
+ * Rules:
+ * - Open the connection on first use, and read the password from the secrets service only
+ *   while connecting; never keep it on the service.
+ * - Report a failure to set up the connection as DbConnectException, and a failing statement
+ *   or transaction call as DbQueryException, with the mysqli exception as previous when there
+ *   is one.
+ * - Add to SQL only fixed text, placeholders, values that the service formats itself, and
+ *   identifiers checked to hold letters, digits, _ and $ only; bind every other value.
+ * - Never nest transactions.
  */
 class Db extends BaseService {
+
+	/** Most rows that insertBatch() sends as one multi-row INSERT. */
 	private const BATCH_ROW_LIMIT         = 1000;
+
+	/** Largest estimated payload in bytes that insertBatch() sends as one multi-row INSERT. */
 	private const BATCH_BYTE_LIMIT        = 4 * 1024 * 1024; // 4 MB coarse estimate
+
+	/** Rows per executeMany() call when insertBatch() splits a larger payload. */
 	private const BATCH_CHUNK_SIZE        = 1000;
 
-	// Connection settings resolved once in init(). Never read from cfg again after that.
-	// The database password is intentionally not retained on this service; it is
-	// resolved from the Secrets service only when opening a connection.
+	/** Server host name or IP address. */
 	private string  $cfgHost;
+
+	/** Database user. */
 	private string  $cfgUser;
+
+	/** Database (schema) name. */
 	private string  $cfgName;
+
+	/** Connection character set. */
 	private string  $cfgCharset;
+
+	/** TCP port, 1-65535. */
 	private int     $cfgPort;
+
+	/** Unix socket path, or null for the mysqli default. */
 	private ?string $cfgSocket;
+
+	/** Connect timeout in seconds, >= 1. */
 	private int     $cfgConnectTimeout;
+
+	/** Secrets key of the database password. */
 	private string  $cfgPasswordSecret;
+
+	/** Session sql_mode, or null to keep the server default. */
 	private ?string $cfgSqlMode;
+
+	/** Session time_zone, or null for the UTC offset of PHP's active time zone. */
 	private ?string $cfgTimezone;
 
-	/** @var ?\mysqli Active connection; null until first use or after close(). */
+	/** Open connection, or null before first use and after close(). */
 	private ?\mysqli $connection = null;
 
-	/**
-	 * Best-effort transaction state for Db-managed transactions.
-	 *
-	 * This tracks beginTransaction(), transaction() and easyTransaction() usage.
-	 * Raw START TRANSACTION calls and implicit commits from DDL/administrative SQL
-	 * can desynchronize this flag because MySQL does not expose that state here.
-	 *
-	 * @var bool
-	 */
+	/** Whether a transaction opened through this service is active; START TRANSACTION sent as SQL and implicit commits are not seen. */
 	private bool $inTransaction = false;
 
-	/** @var array<string, \mysqli_stmt> Statement cache, keyed by trimmed SQL string. */
+	/** @var array<string,\mysqli_stmt> Cached prepared statements by SQL, oldest first. */
 	private array $statementCache = [];
 
+	/** Maximum number of cached statements; 0 disables the cache. */
 	private int $statementCacheLimit;
+
+	/** Statements run since construction or the last reset by countQueries(). */
 	private int $queryCount = 0;
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Initialization
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Read and validate all database configuration. Called once by BaseService constructor.
+	 * Read and check the db cfg once, without connecting.
 	 *
 	 * Behavior:
-	 * - Reads non-secret settings from $app->cfg->db; a service option that is not null wins over its key.
-	 * - Validates every setting and fails fast on invalid values; a missing cfg key throws \OutOfBoundsException.
-	 * - Rejects the legacy `pass` setting in cfg or options so committed credentials cannot be silently ignored.
-	 * - Resolves the password secret key name eagerly, but reads the secret value lazily when a connection is opened.
-	 * - Sets mysqli global reporting mode (MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT).
-	 * - Does NOT open a database connection.
+	 * - A service option that is not null wins over the cfg key of the same name.
+	 * - Reads the name of the password secret, not the password.
+	 * - Rejects the removed key pass in cfg and options, so a password left there is not
+	 *   silently ignored.
+	 * - Switches mysqli error reporting to MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT, for every
+	 *   mysqli call in the process.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On an empty or invalid value, or the legacy pass key.
-	 * @throws \OutOfBoundsException When the db node, or a key that no option overrides, is missing.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When host, user, name or charset is empty, password_secret is not a non-empty string, port, connect_timeout or statement_cache_limit is not an integer or string of digits in range (port 1-65535, connect_timeout >= 1, statement_cache_limit >= 0), or pass is set.
+	 * @throws \OutOfBoundsException  When the db node, or a key that no option overrides, is missing.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		// Service options win over cfg; an option that is null falls back to the cfg key.
@@ -245,21 +237,21 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Read API
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Fetch the first column of the first row.
+	 * Return the first column of the first row of a SELECT.
 	 *
-	 * Behavior:
-	 * - Returns null when no rows are found.
-	 * - Always frees the result before returning.
+	 * Typical usage:
+	 *   $count = (int)$this->app->db->fetchValue('SELECT COUNT(*) FROM users WHERE active = ?', [1]);
 	 *
-	 * @param string $sql    SELECT query with ? placeholders.
-	 * @param array  $params Positional parameter values.
-	 * @return mixed First column of the first row, or null.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * @param  string  $sql  SELECT with ? placeholders; trimmed.
+	 * @param  list<scalar|null>  $params  Values for the placeholders, in order; a bool is bound as 0 or 1.
+	 * @return mixed  Value as mysqlnd returns it; null when there is no row or the value is NULL.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty, the statement fails or it produces no result set.
 	 */
 	public function fetchValue(string $sql, array $params = []): mixed {
 		$result = $this->select($sql, $params);
@@ -273,16 +265,16 @@ class Db extends BaseService {
 
 
 	/**
-	 * Fetch the first row as an associative array.
+	 * Return the first row of a SELECT.
 	 *
-	 * Behavior:
-	 * - Returns null when no rows are found.
-	 * - Always frees the result before returning.
+	 * Typical usage:
+	 *   $user = $this->app->db->fetchRow('SELECT id, email FROM users WHERE id = ?', [$id]);
 	 *
-	 * @param string $sql    SELECT query with ? placeholders.
-	 * @param array  $params Positional parameter values.
-	 * @return array<string,mixed>|null First row as assoc array, or null.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * @param  string  $sql  SELECT with ? placeholders; trimmed.
+	 * @param  list<scalar|null>  $params  Values for the placeholders, in order; a bool is bound as 0 or 1.
+	 * @return array<string,mixed>|null  Values by column name, as mysqlnd returns them; null when there is no row.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty, the statement fails or it produces no result set.
 	 */
 	public function fetchRow(string $sql, array $params = []): ?array {
 		$result = $this->select($sql, $params);
@@ -296,16 +288,16 @@ class Db extends BaseService {
 
 
 	/**
-	 * Fetch all rows as associative arrays.
+	 * Return every row of a SELECT.
 	 *
-	 * Behavior:
-	 * - Returns an empty array when no rows are found.
-	 * - Always frees the result before returning.
+	 * Typical usage:
+	 *   $rows = $this->app->db->fetchAll('SELECT id, title FROM articles WHERE author_id = ?', [$authorId]);
 	 *
-	 * @param string $sql    SELECT query with ? placeholders.
-	 * @param array  $params Positional parameter values.
-	 * @return array<int,array<string,mixed>> All rows.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * @param  string  $sql  SELECT with ? placeholders; trimmed.
+	 * @param  list<scalar|null>  $params  Values for the placeholders, in order; a bool is bound as 0 or 1.
+	 * @return list<array<string,mixed>>  Rows of values by column name, as mysqlnd returns them; [] when there is none.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty, the statement fails or it produces no result set.
 	 */
 	public function fetchAll(string $sql, array $params = []): array {
 		$result = $this->select($sql, $params);
@@ -318,16 +310,20 @@ class Db extends BaseService {
 
 
 	/**
-	 * Count rows from an existing result object or a SQL string.
+	 * Return the number of rows of a result set, or of a SELECT run for the purpose.
 	 *
 	 * Behavior:
-	 * - Returns num_rows directly when a mysqli_result is passed (no extra query).
-	 * - Executes the SQL and frees the result otherwise.
+	 * - A result set is counted without a query. A SELECT is run, counted and freed.
 	 *
-	 * @param \mysqli_result|string $resultOrSql Existing result or SQL SELECT string.
-	 * @param array                 $params      Positional params when SQL is provided.
-	 * @return int Row count (0 when empty).
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * Notes:
+	 * - Counting a SELECT transfers all its rows; SELECT COUNT(*) through fetchValue() lets the
+	 *   server count instead.
+	 *
+	 * @param  \mysqli_result|string  $resultOrSql  Buffered result set, or SELECT with ? placeholders.
+	 * @param  list<scalar|null>  $params  Values for the placeholders when $resultOrSql is SQL.
+	 * @return int
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When SQL is given and the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When SQL is given and it is empty, fails or produces no result set.
 	 */
 	public function countRows(\mysqli_result|string $resultOrSql, array $params = []): int {
 		if ($resultOrSql instanceof \mysqli_result) {
@@ -344,17 +340,20 @@ class Db extends BaseService {
 
 
 	/**
-	 * Test whether at least one row exists for a WHERE clause.
+	 * Tell whether a table has a row that matches a condition.
 	 *
 	 * Behavior:
-	 * - Builds SELECT 1 ... LIMIT 1. Minimal server-side work.
-	 * - $where must be non-empty (without the WHERE keyword); fails fast if empty.
+	 * - The server stops at the first matching row.
 	 *
-	 * @param string $table  Table name (may be schema-qualified).
-	 * @param string $where  WHERE fragment without the WHERE keyword.
-	 * @param array  $params Positional params for the WHERE fragment.
-	 * @return bool True when at least one matching row exists.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On empty WHERE or failure.
+	 * Typical usage:
+	 *   $taken = $this->app->db->exists('users', 'email = ?', [$email]);
+	 *
+	 * @param  string  $table  Table name, or schema.table; letters, digits, _ and $ in each part.
+	 * @param  string  $where  Condition without the WHERE keyword, with ? placeholders; trimmed, not empty. Values belong in $params, never in this text.
+	 * @param  list<scalar|null>  $params  Values for the placeholders of $where.
+	 * @return bool
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When $where is empty, the table name is invalid or the statement fails.
 	 */
 	public function exists(string $table, string $where, array $params = []): bool {
 		$where = \trim($where);
@@ -373,22 +372,28 @@ class Db extends BaseService {
 
 
 	/**
-	 * Execute a SELECT and return the raw mysqli_result.
+	 * Run a SELECT and return its buffered result set.
 	 *
 	 * Behavior:
-	 * - Uses the prepared-statement path (cached if limit > 0).
-	 * - Frees any pending state on cached statements before execute.
-	 * - Uncached statements are closed after get_result(); the buffered result
-	 *   (mysqlnd) is independent and safe to read after statement close.
-	 * - Caller owns the returned result and must free it.
+	 * - The caller owns the result set and frees it. It stays readable after the statement is
+	 *   closed.
 	 *
 	 * Notes:
-	 * - Requires mysqlnd. Use selectNoMysqlnd() when mysqlnd is unavailable.
+	 * - Requires mysqlnd. selectNoMysqlnd() works without it.
 	 *
-	 * @param string $sql    SELECT query with ? placeholders.
-	 * @param array  $params Positional parameter values.
-	 * @return \mysqli_result Active result set (caller must free).
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure or no result set.
+	 * Typical usage:
+	 *   $result = $this->app->db->select('SELECT id FROM users WHERE active = ?', [1]);
+	 *   try {
+	 *       while ($row = $result->fetch_assoc()) { ... }
+	 *   } finally {
+	 *       $result->free();
+	 *   }
+	 *
+	 * @param  string  $sql  SELECT with ? placeholders; trimmed.
+	 * @param  list<scalar|null>  $params  Values for the placeholders, in order; a bool is bound as 0 or 1.
+	 * @return \mysqli_result
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty, the statement fails or it produces no result set.
 	 */
 	public function select(string $sql, array $params = []): \mysqli_result {
 		$sql = \trim($sql);
@@ -427,27 +432,28 @@ class Db extends BaseService {
 
 
 	/**
-	 * Execute a SELECT without relying on mysqlnd. Streams rows via a Generator.
+	 * Run a SELECT without mysqlnd and yield its rows one at a time.
 	 *
 	 * Behavior:
-	 * - Always uses an uncached (fresh) prepared statement.
-	 * - Yields rows one by one; the statement is closed via finally when done or abandoned.
+	 * - Nothing runs until the generator is first advanced, so the exceptions come from the
+	 *   iteration, not from the call.
+	 * - Uses a statement of its own, never cached, that is closed when the generator finishes
+	 *   or is destroyed.
 	 *
 	 * Notes:
-	 * - "$detached = $row; yield $detached" does NOT produce a deep copy. $row is built
-	 *   with references from bind_result(). Array assignment copies the structure, but
-	 *   PHP reference chains are preserved: $detached shares the same underlying zval
-	 *   as $row for each column. A subsequent fetch() call updates both.
-	 *   This is safe for standard foreach usage where each row is processed before the
-	 *   generator advances. Do NOT accumulate yielded rows across iterations without
-	 *   an explicit scalar copy (e.g. array_map) - you will read the last fetched values.
-	 *   The pattern is kept because it matches LiteMySQLi and is correct in all normal usage.
-	 * - Do not run concurrent generators on the same connection.
+	 * - The values of a yielded row are references to the bind buffer, which the next fetch
+	 *   overwrites. Use each row before advancing; to keep rows, copy their values first, such
+	 *   as with array_map().
+	 * - Do not run two of these generators on one connection at the same time.
 	 *
-	 * @param string $sql    SELECT query with ? placeholders.
-	 * @param array  $params Positional parameter values.
-	 * @return \Generator<int,array<string,mixed>> Yields each row as an assoc array.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * Typical usage:
+	 *   foreach ($this->app->db->selectNoMysqlnd('SELECT id, email FROM users') as $row) { ... }
+	 *
+	 * @param  string  $sql  SELECT with ? placeholders; trimmed.
+	 * @param  list<scalar|null>  $params  Values for the placeholders, in order; a bool is bound as 0 or 1.
+	 * @return \Generator<int,array<string,mixed>>  Rows of values by column name.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty, the statement fails or it produces no result set.
 	 */
 	public function selectNoMysqlnd(string $sql, array $params = []): \Generator {
 		$sql = \trim($sql);
@@ -473,7 +479,7 @@ class Db extends BaseService {
 			$meta->free();
 
 			// Build the bind buffer. $row values are references (required by bind_result).
-			// See Notes in class PHPDoc for the reference-semantics caveat.
+			// See the Notes of this method for what that means for the yielded rows.
 			$row  = [];
 			$bind = [];
 			foreach ($fields as $f) {
@@ -487,7 +493,7 @@ class Db extends BaseService {
 
 			while ($statement->fetch()) {
 				// Array assignment preserves the reference chain from bind_result().
-				// Safe for standard foreach; see class-level Notes for accumulation caveat.
+				// Safe for standard foreach; keeping rows needs a copy, see the Notes of this method.
 				$detached = $row;
 				yield $detached;
 			}
@@ -502,21 +508,25 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Write API
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Execute a non-SELECT statement and return the affected row count.
+	 * Run a statement and return the number of rows it affected.
 	 *
-	 * Behavior:
-	 * - Uses the prepared-statement path (cached if limit > 0).
-	 * - Returns mysqli::affected_rows.
+	 * Notes:
+	 * - For an UPDATE, the server counts changed rows: A matching row that already holds the
+	 *   new values is not counted.
 	 *
-	 * @param string $sql    SQL with ? placeholders.
-	 * @param array  $params Positional parameter values.
-	 * @return int Affected row count.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * Typical usage:
+	 *   $ended = $this->app->db->execute('UPDATE sessions SET ended_at = NOW() WHERE user_id = ?', [$userId]);
+	 *
+	 * @param  string  $sql  SQL with ? placeholders; trimmed.
+	 * @param  list<scalar|null>  $params  Values for the placeholders, in order; a bool is bound as 0 or 1.
+	 * @return int
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty or the statement fails.
 	 */
 	public function execute(string $sql, array $params = []): int {
 		$sql = \trim($sql);
@@ -531,8 +541,7 @@ class Db extends BaseService {
 			$this->freeStatementResultIfPossible($statement);
 			$this->bindParams($statement, $params);
 			$statement->execute();
-			// Read affected_rows from the connection, not the statement, to stay consistent
-			// with how LiteMySQLi reads it. Both are valid; connection is more canonical.
+			// The connection reports the statement that just ran, so its affected_rows equals the statement's.
 			return $this->getConnection()->affected_rows;
 		} catch (\mysqli_sql_exception $e) {
 			throw $this->createQueryException($e->getMessage(), $sql, $params, (int)$e->getCode(), $e);
@@ -545,19 +554,22 @@ class Db extends BaseService {
 
 
 	/**
-	 * Execute the same statement repeatedly with different parameter sets.
+	 * Run one statement once per set of values, and return the number of rows they affected together.
 	 *
 	 * Behavior:
-	 * - Prepares (or reuses cached) the statement once, then executes per param set.
-	 * - Returns total affected rows across all executions.
+	 * - Prepares the statement once and runs it for each set, in order.
+	 * - An empty list runs nothing and returns 0, whatever the SQL.
+	 * - Opens no transaction: The runs before a failing one stay applied unless the caller runs
+	 *   the call inside transaction().
 	 *
 	 * Notes:
-	 * - For large batches, wrap in transaction() to avoid per-row fsync overhead.
+	 * - Inside a transaction, a large batch saves a commit per run.
 	 *
-	 * @param string  $sql       SQL with ? placeholders (prepared once, reused).
-	 * @param array[] $paramSets Ordered array of parameter arrays.
-	 * @return int Total affected row count.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * @param  string  $sql  SQL with ? placeholders; trimmed.
+	 * @param  array<array-key,list<scalar|null>>  $paramSets  One list of placeholder values per run.
+	 * @return int
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty or a run fails.
 	 */
 	public function executeMany(string $sql, array $paramSets): int {
 		if ($paramSets === []) {
@@ -594,17 +606,16 @@ class Db extends BaseService {
 
 
 	/**
-	 * Insert a single row and return the insert id.
+	 * Insert one row and return its AUTO_INCREMENT id.
 	 *
-	 * Behavior:
-	 * - Validates and quotes table and column identifiers.
-	 * - Builds a parameterized INSERT.
-	 * - Returns the current mysqli insert_id.
+	 * Typical usage:
+	 *   $id = $this->app->db->insert('users', ['email' => $email, 'active' => 1]);
 	 *
-	 * @param string              $table Table name (may be schema-qualified).
-	 * @param array<string,mixed> $data  Column/value map.
-	 * @return int Insert id.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On empty data or failure.
+	 * @param  string  $table  Table name, or schema.table; letters, digits, _ and $ in each part.
+	 * @param  array<string,scalar|null>  $data  Values by column name; letters, digits, _ and $ in each name.
+	 * @return int  0 when the table has no AUTO_INCREMENT column.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When $data is empty, a name is invalid or the statement fails.
 	 */
 	public function insert(string $table, array $data): int {
 		if ($data === []) {
@@ -631,23 +642,24 @@ class Db extends BaseService {
 
 
 	/**
-	 * Insert multiple rows efficiently.
+	 * Insert many rows and return the number of rows inserted.
 	 *
 	 * Behavior:
-	 * - Strategy 1 (small payload): single multi-row INSERT, one round trip.
-	 *   Threshold: <= 1000 rows AND <= 4 MB coarse byte estimate.
-	 * - Strategy 2 (large payload): chunked executeMany() inside its own transaction.
-	 *   Throws if a transaction is already active; nested transactions are not supported
-	 *   and would implicitly commit the outer transaction under InnoDB.
-	 * - All rows must have the same columns as the first row (same keys, same count).
-	 *   Validation uses a count guard followed by one array_diff_key() check:
-	 *   if count matches and no expected key is missing, no extra key can exist either.
+	 * - Every row has exactly the columns of the first row, in any key order.
+	 * - Up to BATCH_ROW_LIMIT rows within an estimated BATCH_BYTE_LIMIT bytes go in one
+	 *   multi-row INSERT.
+	 * - A larger payload goes in chunks of BATCH_CHUNK_SIZE rows inside a transaction of its
+	 *   own, so it is inserted completely or not at all. That path throws while a transaction
+	 *   opened through this service is active, instead of nesting.
 	 *
-	 * @param string                         $table Table name (may be schema-qualified).
-	 * @param array<int,array<string,mixed>> $rows  Rows to insert; all must share the first row's column set.
-	 * @return int Total affected row count.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On empty input, schema mismatch,
-	 *         active transaction (chunked path only), or failure.
+	 * Typical usage:
+	 *   $this->app->db->insertBatch('order_lines', $lines);
+	 *
+	 * @param  string  $table  Table name, or schema.table; letters, digits, _ and $ in each part.
+	 * @param  array<array-key,array<string,scalar|null>>  $rows  Rows of values by column name.
+	 * @return int
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When $rows or its first row is empty, a row is not an array or has other columns than the first, a name is invalid, a large payload meets an active transaction, or a statement fails.
 	 */
 	public function insertBatch(string $table, array $rows): int {
 		if ($rows === []) {
@@ -751,19 +763,22 @@ class Db extends BaseService {
 
 
 	/**
-	 * Update rows and return the affected row count.
+	 * Update the rows of a table that match a condition, and return the number of rows changed.
 	 *
-	 * Behavior:
-	 * - Validates and quotes table and column identifiers.
-	 * - WHERE must be non-empty; fails fast otherwise.
-	 * - WHERE params are appended after SET params.
+	 * Notes:
+	 * - The server counts changed rows: A matching row that already holds the new values is
+	 *   not counted.
 	 *
-	 * @param string              $table  Table name (may be schema-qualified).
-	 * @param array<string,mixed> $data   Column/value map for the SET clause.
-	 * @param string              $where  WHERE fragment without the WHERE keyword.
-	 * @param array               $params Positional params for the WHERE fragment.
-	 * @return int Affected row count.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On empty data, empty WHERE, or failure.
+	 * Typical usage:
+	 *   $this->app->db->update('users', ['active' => 0], 'id = ?', [$id]);
+	 *
+	 * @param  string  $table  Table name, or schema.table; letters, digits, _ and $ in each part.
+	 * @param  array<string,scalar|null>  $data  New values by column name; letters, digits, _ and $ in each name.
+	 * @param  string  $where  Condition without the WHERE keyword, with ? placeholders; trimmed, not empty. Values belong in $params, never in this text.
+	 * @param  list<scalar|null>  $params  Values for the placeholders of $where; bound after the values of $data.
+	 * @return int
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When $data or $where is empty, a name is invalid or the statement fails.
 	 */
 	public function update(string $table, array $data, string $where, array $params = []): int {
 		if ($data === []) {
@@ -790,16 +805,17 @@ class Db extends BaseService {
 
 
 	/**
-	 * Delete rows and return the affected row count.
+	 * Delete the rows of a table that match a condition, and return how many were deleted.
 	 *
-	 * Behavior:
-	 * - WHERE must be non-empty; fails fast otherwise.
+	 * Typical usage:
+	 *   $this->app->db->delete('sessions', 'expires_at < NOW()');
 	 *
-	 * @param string $table  Table name (may be schema-qualified).
-	 * @param string $where  WHERE fragment without the WHERE keyword.
-	 * @param array  $params Positional params for the WHERE fragment.
-	 * @return int Affected row count.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On empty WHERE or failure.
+	 * @param  string  $table  Table name, or schema.table; letters, digits, _ and $ in each part.
+	 * @param  string  $where  Condition without the WHERE keyword, with ? placeholders; trimmed, not empty. Values belong in $params, never in this text.
+	 * @param  list<scalar|null>  $params  Values for the placeholders of $where.
+	 * @return int
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When $where is empty, the table name is invalid or the statement fails.
 	 */
 	public function delete(string $table, string $where, array $params = []): int {
 		$where = \trim($where);
@@ -814,21 +830,24 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Raw query escape hatches
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Run a raw SQL query without parameter binding.
+	 * Run one SQL statement without parameter binding.
 	 *
-	 * Notes:
-	 * - No binding. Never pass untrusted input.
-	 * - Use for DDL, administrative commands, or quick debug.
-	 * - Caller owns any returned mysqli_result and must free it.
+	 * For DDL, administrative statements and debugging. The SQL runs as given, so it must never
+	 * contain input.
 	 *
-	 * @param string $sql Raw SQL to execute.
-	 * @return \mysqli_result|bool Result for reads; true for writes.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On empty SQL or failure.
+	 * Behavior:
+	 * - Returns the result set of a statement that produces one, which the caller frees, and
+	 *   true otherwise.
+	 *
+	 * @param  string  $sql  Complete SQL; trimmed.
+	 * @return \mysqli_result|bool
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the SQL is empty or the statement fails.
 	 */
 	public function queryRaw(string $sql): \mysqli_result|bool {
 		$sql = \trim($sql);
@@ -847,24 +866,23 @@ class Db extends BaseService {
 
 
 	/**
-	 * Execute multiple raw SQL statements via multi_query().
+	 * Run several SQL statements, separated by semicolons, without parameter binding.
+	 *
+	 * For migrations, DDL batches and seeding. The SQL runs as given, so it must never contain
+	 * input.
 	 *
 	 * Behavior:
-	 * - Results are collected in order: mysqli_result for SELECT/SHOW, true for others.
-	 * - Under MYSQLI_REPORT_STRICT (active globally), any mid-batch MySQL error is thrown
-	 *   as mysqli_sql_exception immediately. The catch block then:
-	 *   1) Frees all mysqli_result objects collected before the failure.
-	 *   2) Drains remaining pending results best-effort to re-sync the connection.
-	 * - Query counter is incremented once per processed result slot.
+	 * - Returns one entry per statement, in order: the result set of a statement that produces
+	 *   one, which the caller frees, and true otherwise.
+	 * - Empty SQL returns [] without connecting.
+	 * - When a statement fails, the statements before it are not undone; the result sets
+	 *   collected so far are freed and the pending results drained, so the connection stays
+	 *   usable.
 	 *
-	 * Notes:
-	 * - Caller owns returned mysqli_result objects and must free them.
-	 * - No parameter binding. Never pass untrusted input.
-	 * - Use for migrations, DDL batches, or seeding.
-	 *
-	 * @param string $sql Multiple raw SQL statements separated by semicolons.
-	 * @return array<int,\mysqli_result|bool> Ordered results.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On dispatch or mid-batch failure.
+	 * @param  string  $sql  Statements separated by semicolons; trimmed.
+	 * @return list<\mysqli_result|true>
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When a statement fails.
 	 */
 	public function queryRawMulti(string $sql): array {
 		$sql = \trim($sql);
@@ -919,31 +937,27 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Transactions
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Begin a transaction, optionally for a single explicit isolation level.
+	 * Open a transaction, optionally with an isolation level for this transaction only.
 	 *
 	 * Behavior:
-	 * - With $isolation === null, behavior is unchanged: the transaction runs under
-	 *   the connection/session default isolation.
-	 * - With an isolation given, the level is applied to THIS transaction only via
-	 *   the database "next transaction only" mechanism, before the transaction is
-	 *   opened. It does not change the session default and does not leak into any
-	 *   later transaction (see applyNextTransactionIsolation()).
+	 * - Without $isolation, the transaction runs at the session's isolation level.
+	 * - With $isolation, the level applies to this transaction only: The session level stays
+	 *   unchanged, and later transactions run at it again.
+	 * - Opens the connection when none is open.
+	 * - When the level cannot be set, no transaction is opened.
 	 *
 	 * Notes:
-	 * - Opens a lazy connection if not yet connected (beginning a transaction is
-	 *   a meaningful first operation; this is intentional and correct).
-	 * - If the isolation cannot be applied, no transaction is opened and
-	 *   $inTransaction stays false, because the level is applied before both
-	 *   begin_transaction() and the flag assignment.
+	 * - transaction() opens, commits and rolls back in one call, and is the safer choice.
 	 *
-	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation|null $isolation Isolation for this transaction only, or null for the default.
+	 * @param  TransactionIsolation|null  $isolation  Isolation level of this transaction, or null for the session's.
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When a transaction opened through this service is active, or the server refuses the level or the transaction.
 	 */
 	public function beginTransaction(?TransactionIsolation $isolation = null): void {
 		if ($this->inTransaction) {
@@ -967,12 +981,12 @@ class Db extends BaseService {
 	/**
 	 * Commit the current transaction.
 	 *
-	 * Notes:
-	 * - Requires an active connection. Throws if no connection exists, because
-	 *   there is no transaction to commit without one.
+	 * Behavior:
+	 * - Counts no transaction as active afterwards, also when the commit fails.
+	 * - Opens no connection: Without one there is no transaction to commit.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure or no active connection.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When no connection is open or the commit fails.
 	 */
 	public function commit(): void {
 		try {
@@ -988,12 +1002,12 @@ class Db extends BaseService {
 	/**
 	 * Roll back the current transaction.
 	 *
-	 * Notes:
-	 * - Requires an active connection. Throws if no connection exists, because
-	 *   there is no transaction to roll back without one.
+	 * Behavior:
+	 * - Counts no transaction as active afterwards, also when the rollback fails.
+	 * - Opens no connection: Without one there is no transaction to roll back.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On failure or no active connection.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When no connection is open or the rollback fails.
 	 */
 	public function rollback(): void {
 		try {
@@ -1007,28 +1021,29 @@ class Db extends BaseService {
 
 
 	/**
-	 * Run a callable inside a transaction. Commits on success, rolls back on any exception.
+	 * Run a callback inside a transaction: Commit when it returns, roll back when it throws.
 	 *
 	 * Behavior:
-	 * - Passes the current Db instance to the callback.
-	 * - On success: commits and returns the callback's return value.
-	 * - On callback failure + successful rollback: rethrows the original exception unchanged.
-	 * - On callback failure + rollback failure: throws a new DbQueryException whose message
-	 *   describes both failures, with the original callback exception chained as $previous.
-	 *   This ensures neither failure is silently discarded.
+	 * - Passes this service to the callback and returns what the callback returns.
+	 * - When the callback or the commit throws and the rollback succeeds, rethrows that
+	 *   exception unchanged.
+	 * - When the rollback fails too, throws a DbQueryException that names both failures, with
+	 *   the first exception as previous, so neither is lost.
 	 *
 	 * Typical usage:
-	 *   $orderId = $this->app->db->transaction(function(Db $db) use ($data): int {
-	 *       $id = $db->insert('orders', $data);
-	 *       $db->insert('order_lines', ['order_id' => $id, ...]);
+	 *   $orderId = $this->app->db->transaction(function (Db $db) use ($order, $lines): int {
+	 *       $id = $db->insert('orders', $order);
+	 *       $db->insertBatch('order_lines', $lines);
 	 *       return $id;
 	 *   });
 	 *
-	 * @param callable $callback Callback receiving the Db instance; may return any value.
-	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation|null $isolation Isolation for this transaction only, or null for the default.
-	 * @return mixed Callback return value.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException When rollback also fails.
-	 * @throws \Throwable Rethrows the original callback exception when rollback succeeds.
+	 * @param  callable(Db): mixed  $callback  Work to run inside the transaction.
+	 * @param  TransactionIsolation|null  $isolation  Isolation level of this transaction, or null for the session's.
+	 * @return mixed  What the callback returns.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the transaction cannot be opened, or the rollback after a failure fails.
+	 * @throws \Throwable  The exception of the callback or the commit, after a successful rollback.
+	 * @see \CitOmni\Infrastructure\Service\Db::beginTransaction()  How the isolation level applies.
 	 */
 	public function transaction(callable $callback, ?TransactionIsolation $isolation = null): mixed {
 		$this->beginTransaction($isolation);
@@ -1056,12 +1071,17 @@ class Db extends BaseService {
 
 
 	/**
-	 * Alias for transaction(). Provided for backward compatibility with LiteMySQLi callers.
+	 * Run a callback inside a transaction, exactly as transaction() does.
 	 *
-	 * @param callable $callback Callback receiving the Db instance.
-	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation|null $isolation Isolation for this transaction only, or null for the default.
-	 * @return mixed Callback return value.
-	 * @throws \Throwable Rethrows on failure after rollback attempt.
+	 * Kept for code written for LiteMySQLi's method of the same name.
+	 *
+	 * @param  callable(Db): mixed  $callback  Work to run inside the transaction.
+	 * @param  TransactionIsolation|null  $isolation  Isolation level of this transaction, or null for the session's.
+	 * @return mixed  What the callback returns.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the transaction cannot be opened, or the rollback after a failure fails.
+	 * @throws \Throwable  The exception of the callback or the commit, after a successful rollback.
+	 * @see \CitOmni\Infrastructure\Service\Db::transaction()  The full contract.
 	 */
 	public function easyTransaction(callable $callback, ?TransactionIsolation $isolation = null): mixed {
 		return $this->transaction($callback, $isolation);
@@ -1069,33 +1089,24 @@ class Db extends BaseService {
 
 
 	/**
-	 * Apply an isolation level to the NEXT transaction only, then let it revert.
+	 * Set the isolation level of the next transaction of the session only.
 	 *
 	 * Behavior:
-	 * - Issues "SET TRANSACTION ISOLATION LEVEL <level>" with no SESSION/GLOBAL
-	 *   keyword. On both MySQL 8.0.16+ and MariaDB 10.6+ this scopes the level to
-	 *   the next single transaction in the session; afterwards the session default
-	 *   is restored automatically. The session default is never mutated, so there
-	 *   is nothing to save or restore and no leak into later transactions.
-	 * - Must run while no transaction is active and immediately before
-	 *   begin_transaction(), so the level binds to the transaction opened next.
-	 *   This statement does not cause an implicit commit on either engine.
+	 * - Sends SET TRANSACTION ISOLATION LEVEL without SESSION or GLOBAL, which on MySQL
+	 *   8.0.16+ and MariaDB 10.6+ applies to the next transaction only and leaves the session
+	 *   level unchanged. The statement causes no implicit commit on either.
+	 * - Does not count as a query in countQueries().
 	 *
 	 * Notes:
-	 * - The level text is a fixed constant selected by a closed enum via match(),
-	 *   never caller-provided text, so embedding it directly is injection-safe.
-	 *   This mirrors the fixed-format time-zone statement in applySessionSettings().
-	 * - Not counted in queryCount: transaction-control and session statements are
-	 *   not counted elsewhere in this class (sql_mode, time_zone), and this stays
-	 *   consistent with that convention.
-	 * - mysqli runs under MYSQLI_REPORT_STRICT, so a failure throws
-	 *   \mysqli_sql_exception, which the caller (beginTransaction) converts to a
-	 *   DbQueryException before any transaction is considered active.
+	 * - Must run while no transaction is active and directly before the transaction opens, so
+	 *   that the level binds to it.
+	 * - The level text is fixed for each case of the enum, never caller text, so it is safe
+	 *   to embed.
 	 *
-	 * @param \mysqli $conn Active connection.
-	 * @param \CitOmni\Infrastructure\Enum\TransactionIsolation $isolation Requested isolation for the next transaction.
+	 * @param  \mysqli  $conn  Open connection.
+	 * @param  TransactionIsolation  $isolation  Level of the next transaction.
 	 * @return void
-	 * @throws \mysqli_sql_exception On failure to apply the level.
+	 * @throws \mysqli_sql_exception  When the server refuses the statement.
 	 */
 	private function applyNextTransactionIsolation(\mysqli $conn, TransactionIsolation $isolation): void {
 		$level = match ($isolation) {
@@ -1110,20 +1121,19 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Connection recovery
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Check whether the active MySQL connection is currently usable.
+	 * Tell whether the open connection answers, without opening one.
 	 *
 	 * Behavior:
-	 * - Returns false when no connection has been opened yet.
-	 * - Issues a trivial SELECT 1 round-trip when a connection exists.
-	 * - Does not increment the query counter; this is a liveness probe, not workload.
-	 * - Catches both mysqli_sql_exception and lower-level errors from stale/closed handles.
+	 * - Returns false when no connection is open, and when SELECT 1 fails for any reason,
+	 *   such as a connection the server has closed.
+	 * - Does not count as a query in countQueries().
 	 *
-	 * @return bool True when an active connection responds, false otherwise.
+	 * @return bool
 	 */
 	public function checkConnection(): bool {
 		if (!$this->connection instanceof \mysqli) {
@@ -1150,16 +1160,18 @@ class Db extends BaseService {
 
 
 	/**
-	 * Ensure a usable MySQL connection exists.
+	 * Make sure an open connection answers, opening a new one when it does not.
 	 *
-	 * Intended for long-running CLI processes before resuming database work after
-	 * idle time, external IO, or human-in-the-loop pauses. Opens a lazy connection
-	 * when none exists, or reconnects when the existing connection is no longer
-	 * usable.
+	 * For a long-running CLI process before it resumes database work after idle time,
+	 * external IO or a pause for a person, when the server may have closed the connection.
+	 *
+	 * Behavior:
+	 * - Keeps a connection that answers; otherwise opens one as reconnect() does.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On reconnect failure.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException If called inside a tracked transaction.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the connection does not answer while a transaction opened through this service is active.
+	 * @see \CitOmni\Infrastructure\Service\Db::reconnect()  What reopening discards.
 	 */
 	public function ensureConnection(): void {
 		if ($this->checkConnection()) {
@@ -1171,16 +1183,16 @@ class Db extends BaseService {
 
 
 	/**
-	 * Rebuild the MySQL connection in place.
+	 * Close the connection and open a new one with the same settings.
 	 *
-	 * Drops cached statements, closes the current handle best-effort, then opens a
-	 * freshly initialized connection using the stored configuration. Refuses to
-	 * reconnect during a tracked transaction because transaction state would be
-	 * lost on the old connection.
+	 * Behavior:
+	 * - Closes the cached statements and the old connection, ignoring failures.
+	 * - Refuses while a transaction opened through this service is active, because the
+	 *   transaction would be lost.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On reconnect failure.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException If called inside a tracked transaction.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the new connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When a transaction opened through this service is active.
 	 */
 	public function reconnect(): void {
 		if ($this->inTransaction) {
@@ -1196,17 +1208,14 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Meta
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Return the insert id from the most recent INSERT.
+	 * Return the AUTO_INCREMENT id that the last statement on the connection generated.
 	 *
-	 * Behavior:
-	 * - Returns 0 if no connection has been opened yet (no INSERT has run).
-	 *
-	 * @return int Insert id, or 0.
+	 * @return int  0 when no connection is open or the last statement generated no id.
 	 */
 	public function lastInsertId(): int {
 		return $this->connection !== null ? $this->connection->insert_id : 0;
@@ -1214,12 +1223,9 @@ class Db extends BaseService {
 
 
 	/**
-	 * Return the affected row count from the most recent write statement.
+	 * Return the number of rows that the last statement on the connection affected.
 	 *
-	 * Behavior:
-	 * - Returns 0 if no connection has been opened yet.
-	 *
-	 * @return int Affected row count, or 0.
+	 * @return int  0 when no connection is open.
 	 */
 	public function affectedRows(): int {
 		return $this->connection !== null ? $this->connection->affected_rows : 0;
@@ -1227,10 +1233,14 @@ class Db extends BaseService {
 
 
 	/**
-	 * Return (and optionally reset) the internal query counter.
+	 * Return the number of statements run since construction or the last reset.
 	 *
-	 * @param bool $reset Reset the counter after reading.
-	 * @return int Query count.
+	 * Behavior:
+	 * - Counts the statements of the caller. Session settings, transaction control and
+	 *   connection checks are not counted.
+	 *
+	 * @param  bool  $reset  Set the count to 0 after reading it.
+	 * @return int
 	 */
 	public function countQueries(bool $reset = false): int {
 		$count = $this->queryCount;
@@ -1242,12 +1252,9 @@ class Db extends BaseService {
 
 
 	/**
-	 * Return safe debug information for var_dump().
+	 * Describe the service for var_dump() without the password.
 	 *
-	 * Database credentials are not included; the password is not retained on this
-	 * service and the username is treated as non-secret connection configuration.
-	 *
-	 * @return array<string,mixed> Safe diagnostic state.
+	 * @return array<string,mixed>  Connection settings, including the user name and the name of the password secret, and the state of connection, transaction, statement cache and query count.
 	 */
 	public function __debugInfo(): array {
 		return [
@@ -1271,13 +1278,9 @@ class Db extends BaseService {
 
 
 	/**
-	 * Return the last MySQLi error string from the active connection.
+	 * Return the error message of the last call on the connection.
 	 *
-	 * Behavior:
-	 * - Returns null if no connection has been opened yet.
-	 * - Returns null if the last operation produced no error.
-	 *
-	 * @return string|null Last error string, or null.
+	 * @return string|null  Null when no connection is open or the last call had no error.
 	 */
 	public function getLastError(): ?string {
 		if ($this->connection === null) {
@@ -1289,13 +1292,9 @@ class Db extends BaseService {
 
 
 	/**
-	 * Return the last MySQLi error code from the active connection.
+	 * Return the server error number of the last call on the connection.
 	 *
-	 * Behavior:
-	 * - Returns 0 if no connection has been opened yet.
-	 * - Returns 0 if the last operation produced no error.
-	 *
-	 * @return int Error code, or 0.
+	 * @return int  0 when no connection is open or the last call had no error.
 	 */
 	public function getLastErrorCode(): int {
 		return $this->connection !== null ? $this->connection->errno : 0;
@@ -1304,19 +1303,18 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Cache management
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Update the statement cache size limit at runtime.
+	 * Change how many prepared statements the cache keeps.
 	 *
 	 * Behavior:
-	 * - Values below 0 are normalized to 0 (disables caching).
-	 * - 0 immediately clears all cached statements.
-	 * - Shrinking the limit evicts oldest entries (FIFO) until within bounds.
+	 * - A limit of 0 or below disables the cache and closes every cached statement.
+	 * - A lower limit closes the oldest cached statements until the rest fit.
 	 *
-	 * @param int $limit New cache size limit (>= 0).
+	 * @param  int  $limit  Number of statements.
 	 * @return void
 	 */
 	public function setStatementCacheLimit(int $limit): void {
@@ -1338,12 +1336,10 @@ class Db extends BaseService {
 
 
 	/**
-	 * Close and clear all cached prepared statements.
+	 * Close and forget every cached statement, keeping the connection open.
 	 *
 	 * Behavior:
-	 * - Each statement is closed best-effort. A stale or already-closed statement will
-	 *   not interrupt clearing of the remaining entries.
-	 * - The connection remains open and usable after this call.
+	 * - A statement that fails to close does not stop the others.
 	 *
 	 * @return void
 	 */
@@ -1356,11 +1352,12 @@ class Db extends BaseService {
 
 
 	/**
-	 * Close all cached statements and the active connection.
+	 * Close the cached statements and the connection.
 	 *
 	 * Behavior:
-	 * - Safe to call multiple times.
-	 * - After close(), any subsequent query will re-open the connection (lazy).
+	 * - Ignores failures, and may be called again.
+	 * - Counts no transaction as active afterwards; the server rolls back one that was open.
+	 * - The next statement opens a new connection.
 	 *
 	 * @return void
 	 */
@@ -1377,6 +1374,9 @@ class Db extends BaseService {
 		$this->inTransaction = false;
 	}
 
+	/**
+	 * Close the statements and the connection when the service is destroyed, never throwing.
+	 */
 	public function __destruct() {
 		try {
 			$this->close();
@@ -1388,22 +1388,20 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Private: Connection lifecycle
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Return the active connection, opening it lazily on first call.
+	 * Return the open connection, opening and setting it up on first use.
 	 *
 	 * Behavior:
-	 * - $this->connection is assigned only after real_connect(), set_charset(), and
-	 *   applySessionSettings() have all succeeded. A partial failure leaves the object
-	 *   with no connection, and the local $conn is closed best-effort before throwing.
-	 *   This guarantees the object is always in one of two states: no connection, or a
-	 *   fully initialized connection. Never a half-open one.
+	 * - Keeps a new connection only after connect, charset and session settings have all
+	 *   succeeded. A connection that fails half way is closed, so the service holds either no
+	 *   connection or a fully set-up one.
 	 *
-	 * @return \mysqli Active connection.
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On connect or session failure.
+	 * @return \mysqli
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the password secret is missing or invalid, or a step of the setup fails.
 	 */
 	private function getConnection(): \mysqli {
 		if ($this->connection instanceof \mysqli) {
@@ -1446,10 +1444,10 @@ class Db extends BaseService {
 
 
 	/**
-	 * Resolve the database password from the configured application secret key.
+	 * Read the database password from the secrets service.
 	 *
-	 * @return string Database password, which may be an empty string.
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException When the secret is missing or invalid.
+	 * @return string  May be ''.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the secret is missing or the secret store cannot be read, with the secrets exception as previous.
 	 */
 	private function databasePassword(): string {
 		try {
@@ -1465,13 +1463,10 @@ class Db extends BaseService {
 
 
 	/**
-	 * Assert that the connection is already open and return it.
+	 * Return the open connection without opening one.
 	 *
-	 * Used exclusively by commit() and rollback() where opening a new connection
-	 * would be meaningless (there is no transaction to act on).
-	 *
-	 * @return \mysqli Active connection.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException If no active connection exists.
+	 * @return \mysqli
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When no connection is open.
 	 */
 	private function requireConnection(): \mysqli {
 		if (!$this->connection instanceof \mysqli) {
@@ -1484,23 +1479,20 @@ class Db extends BaseService {
 
 
 	/**
-	 * Apply per-session settings after connect: sql_mode and time zone.
+	 * Apply the session settings to a new connection.
 	 *
 	 * Behavior:
-	 * 1) Optional sql_mode applied via prepared statement (config value is user-supplied).
-	 * 2) Explicit timezone config wins: applied via prepared statement and returns early.
-	 * 3) No explicit timezone: derives UTC offset from PHP's active default timezone and
-	 *    applies it via a raw query. The value is sprintf-controlled (not user input).
-	 *    DST-aware because offset is computed for "now" in the active zone.
-	 *    Mirrors LiteMySQLi behavior exactly.
+	 * - Sets sql_mode when one is configured.
+	 * - Sets time_zone to the configured zone; without one, to the UTC offset that PHP's
+	 *   active time zone has at connect time.
 	 *
 	 * Notes:
-	 * - Receives $conn explicitly. $this->connection is not yet assigned when this runs;
-	 *   that assignment happens in getConnection() only after this method succeeds.
+	 * - The derived offset is fixed for the life of the connection, so a long-running process
+	 *   keeps it across a daylight saving change.
 	 *
-	 * @param \mysqli $conn The newly opened, not yet owned connection.
+	 * @param  \mysqli  $conn  New connection, not yet kept by the service.
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On session statement failure.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When a setting fails.
 	 */
 	private function applySessionSettings(\mysqli $conn): void {
 
@@ -1514,7 +1506,7 @@ class Db extends BaseService {
 			return;
 		}
 
-		// Always derive UTC offset from PHP's active timezone - same as LiteMySQLi.
+		// No configured zone: Use the UTC offset of PHP's active time zone, so NOW() matches PHP's clock.
 		$phpTz = \date_default_timezone_get();
 		if ($phpTz === '') {
 			return;
@@ -1535,16 +1527,15 @@ class Db extends BaseService {
 
 
 	/**
-	 * Execute a session initialization statement using a one-off prepared statement.
+	 * Run one session statement with a bound value, on a statement of its own.
 	 *
-	 * Used for sql_mode and explicit timezone where the value comes from config and
-	 * must be treated as user-supplied (not safe to embed raw).
+	 * Binds the value because it comes from cfg and is not safe to embed.
 	 *
-	 * @param \mysqli $conn   Active connection.
-	 * @param string  $sql    SQL with one ? placeholder.
-	 * @param array   $params Parameter values.
+	 * @param  \mysqli  $conn  New connection.
+	 * @param  string  $sql  SQL with one ? placeholder.
+	 * @param  list<scalar|null>  $params  Value for the placeholder.
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException On prepare or execute failure.
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the statement cannot be prepared, bound or run.
 	 */
 	private function runSessionStatement(\mysqli $conn, string $sql, array $params): void {
 		try {
@@ -1567,26 +1558,22 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Private: Statement cache
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Return a prepared statement for the given SQL, using the cache when enabled.
+	 * Return a prepared statement for SQL, from the cache when the cache is enabled.
 	 *
 	 * Behavior:
-	 * - Cache hit: returns the existing statement.
-	 * - Cache miss: prepares, caches, and returns.
-	 * - Cache full: evicts oldest entry (FIFO via array_key_first + unset) before inserting.
-	 * - Cache disabled (limit 0): always prepares a fresh uncached statement.
+	 * - With the cache enabled, a new statement is cached; a full cache first closes and drops
+	 *   its oldest statement.
+	 * - With the cache disabled, every call prepares a new statement, which the caller closes.
 	 *
-	 * Notes:
-	 * - SQL is used verbatim as the cache key (callers must pass trimmed SQL;
-	 *   all public entry points trim before calling here).
-	 *
-	 * @param string $sql Trimmed SQL to prepare.
-	 * @return \mysqli_stmt Prepared statement.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On prepare failure.
+	 * @param  string  $sql  Trimmed SQL; used as the cache key as given.
+	 * @return \mysqli_stmt
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the statement cannot be prepared.
 	 */
 	private function getPreparedStatement(string $sql): \mysqli_stmt {
 		if ($this->statementCacheLimit === 0) {
@@ -1612,11 +1599,12 @@ class Db extends BaseService {
 
 
 	/**
-	 * Prepare a statement without adding it to the cache.
+	 * Prepare a statement without caching it.
 	 *
-	 * @param string $sql SQL to prepare.
-	 * @return \mysqli_stmt Freshly prepared statement.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On prepare failure.
+	 * @param  string  $sql  SQL to prepare.
+	 * @return \mysqli_stmt
+	 * @throws \CitOmni\Infrastructure\Exception\DbConnectException  When the connection cannot be opened.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the statement cannot be prepared.
 	 */
 	private function prepareUncached(string $sql): \mysqli_stmt {
 		try {
@@ -1633,12 +1621,9 @@ class Db extends BaseService {
 
 
 	/**
-	 * Discard any pending buffered result on a statement. No-op on clean statements.
+	 * Discard a pending result of a statement before it runs again, ignoring failures.
 	 *
-	 * Needed before reusing a cached statement that previously produced a result set.
-	 * Called as a best-effort cleanup; failures are silently ignored.
-	 *
-	 * @param \mysqli_stmt $stmt Statement to clean.
+	 * @param  \mysqli_stmt  $stmt  Statement that may hold a result from its last run.
 	 * @return void
 	 */
 	private function freeStatementResultIfPossible(\mysqli_stmt $stmt): void {
@@ -1650,24 +1635,22 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Private: Parameter binding
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Bind positional parameters to a prepared statement with automatic type detection.
+	 * Bind values to the placeholders of a statement, typed by their PHP type.
 	 *
-	 * Type mapping:
-	 * - null    -> 's' (mysqli always transmits SQL NULL regardless of type letter)
-	 * - int     -> 'i'
-	 * - float   -> 'd'
-	 * - bool    -> 'i' (converted to 0/1 before binding)
-	 * - other   -> 's'
+	 * Behavior:
+	 * - An int binds as i, a float as d and a bool as i with 0 or 1. Null and every other
+	 *   value bind as s; mysqli sends null as SQL NULL whatever the type.
+	 * - No values binds nothing.
 	 *
-	 * @param \mysqli_stmt $stmt   Prepared statement.
-	 * @param array        $params Positional parameter values.
+	 * @param  \mysqli_stmt  $stmt  Prepared statement.
+	 * @param  list<scalar|null>  $params  Values for the placeholders, in order.
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On bind failure.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When mysqli reports the binding as failed.
 	 */
 	private function bindParams(\mysqli_stmt $stmt, array $params): void {
 		if ($params === []) {
@@ -1704,18 +1687,16 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Private: Identifier quoting
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Validate and quote a single SQL identifier with backticks.
+	 * Check one SQL identifier and quote it with backticks.
 	 *
-	 * Allows only [A-Za-z0-9_$].
-	 *
-	 * @param string $identifier Identifier to validate and quote.
-	 * @return string Quoted identifier.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On invalid characters.
+	 * @param  string  $identifier  Letters, digits, _ and $ only.
+	 * @return string  The identifier between backticks.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When the identifier is empty or holds another character.
 	 */
 	private function quoteIdentifier(string $identifier): string {
 		if (!\preg_match('/^[A-Za-z0-9_\$]+$/', $identifier)) {
@@ -1727,13 +1708,11 @@ class Db extends BaseService {
 
 
 	/**
-	 * Validate and quote a dot-separated SQL identifier path (e.g., schema.table).
+	 * Check a dot-separated SQL identifier path, such as schema.table, and quote each part with backticks.
 	 *
-	 * Each segment must match [A-Za-z0-9_$].
-	 *
-	 * @param string $path Dot-separated identifier path.
-	 * @return string Quoted identifier path, e.g. `schema`.`table`.
-	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException On invalid segment.
+	 * @param  string  $path  Parts of letters, digits, _ and $ only, separated by dots.
+	 * @return string  Each part between backticks, joined by dots.
+	 * @throws \CitOmni\Infrastructure\Exception\DbQueryException  When a part is empty or holds another character.
 	 */
 	private function quoteIdentifierPath(string $path): string {
 		$segments = \explode('.', $path);
@@ -1753,24 +1732,22 @@ class Db extends BaseService {
 
 
 
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 	// Private: Error context
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
 
 	/**
-	 * Build a DbQueryException with SQL and parameter types included in the message.
+	 * Build a DbQueryException whose message holds the SQL and the types of the parameters.
 	 *
-	 * Raw parameter values are intentionally excluded: they may contain passwords,
-	 * email addresses, tokens, or other sensitive runtime data that must not appear
-	 * in log files. Parameter types (e.g. [string, int, null]) are included instead
-	 * - sufficient for diagnosing type mismatches and placeholder count errors without
-	 * leaking data.
+	 * The values themselves stay out of the message, because they may be passwords, email
+	 * addresses or tokens that must not reach a log. The types, such as [string, int, null],
+	 * are enough to diagnose a type mismatch.
 	 *
-	 * @param string          $message  Driver error message.
-	 * @param string          $sql      SQL involved in the failure.
-	 * @param array           $params   Bound parameters (types extracted; values discarded).
-	 * @param int             $code     Driver error code.
-	 * @param \Throwable|null $previous Causing exception.
+	 * @param  string  $message  Driver error message.
+	 * @param  string  $sql  SQL that failed.
+	 * @param  list<scalar|null>  $params  Values that were bound; only their types are used.
+	 * @param  int  $code  Server error number.
+	 * @param  \Throwable|null  $previous  Driver exception.
 	 * @return \CitOmni\Infrastructure\Exception\DbQueryException
 	 */
 	private function createQueryException(
@@ -1792,12 +1769,10 @@ class Db extends BaseService {
 
 
 	/**
-	 * Produce a compact type-only description of a parameter list.
+	 * Describe the types of a parameter list.
 	 *
-	 * Examples: [int, string, null]  /  [string, float, bool]
-	 *
-	 * @param array $params Parameter values.
-	 * @return string Type list in brackets.
+	 * @param  list<scalar|null>  $params  Parameter values.
+	 * @return string  Such as [int, string, null]; every type other than null, int, float and bool counts as string.
 	 */
 	private function formatParamTypes(array $params): string {
 		$types = [];

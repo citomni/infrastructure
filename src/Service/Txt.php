@@ -19,77 +19,56 @@ use CitOmni\Infrastructure\Exception\TxtConfigException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Resolves translated text strings from application or vendor language files.
+ * Txt: Service that looks up translated texts in the language files of the app and its packages.
  *
- * This service is a native CitOmni replacement for the former LiteTxt-backed
- * wrapper. The public API remains unchanged for migration safety, while the
- * internal implementation now performs file lookup, payload caching, and
- * structured logging natively.
+ * Gives every caller the same lookup with a fallback: Missing or unusable content returns the
+ * caller's default and is logged, so a page stays readable while the log names what to fix.
+ * The texts belong to the language files of each layer; writing the log lines belongs to the
+ * log service.
  *
- * Behavior:
- * - Validates and caches the active language once during initialization
- * - Resolves language files from either the app layer or a vendor/package layer
- * - Caches loaded language payloads in-memory by absolute file path
- * - Logs operational content issues and falls back to default behavior
- *
- * Compatibility:
- * - Caller-visible lookup semantics are preserved
- * - Missing, invalid, or unusable translation values still fall back to $default
- * - Diagnostics are modernized through the native log service
- * - Missing language files now produce one log event instead of the old
- *   indirect two-step pattern
- *
- * Notes:
- * - Real configuration errors still fail fast
- * - This service intentionally depends on the native log service
- * - Absence of the logger is considered framework misconfiguration and should
- *   propagate normally through the global error handler
- * - Cache lifetime is the current request/process lifetime
+ * Rules:
+ * - Throw only for invalid cfg and invalid arguments. A content problem in a language file
+ *   returns the default and writes a log line.
+ * - Load each language file at most once per instance.
  */
 class Txt extends BaseService {
-	
+
+	/** Log file for content problems. */
 	private const LOG_FILE = 'txt.jsonl';
+
+	/** Layer name of the app's own language files. */
 	private const APP_LAYER = 'app';
+
+	/** Directory of the app's language files, one subdirectory per language. */
 	private const APP_LANGUAGE_PATH = \CITOMNI_APP_PATH . '/language';
+
+	/** Composer vendor directory, which holds the language files of package layers. */
 	private const VENDOR_PATH = \CITOMNI_APP_PATH . '/vendor';
+
+	/** Valid language file name: letters, digits, /, _ and -, starting and ending with a letter or digit. */
 	private const FILE_PATTERN = '~^[A-Za-z0-9](?:[A-Za-z0-9/_-]*[A-Za-z0-9])?$~';
+
+	/** Valid package layer: a Composer package name, vendor/package. */
 	private const LAYER_PATTERN = '~^[a-z0-9._-]+/[a-z0-9._-]+$~i';
+
+	/** Valid locale.language: xx or xx_YY, such as da or da_DK. */
 	private const LANGUAGE_PATTERN = '~^[a-z]{2}(?:_[A-Z]{2})?$~';
 
 
-	/**
-	 * Cached language payloads keyed by absolute file path.
-	 *
-	 * Array shape:
-	 * - <absolute-file-path> => array<string, mixed>
-	 *
-	 * Invalid or missing payloads are normalized to an empty array after a
-	 * single log event during first load.
-	 *
-	 * @var array<string, array<string, mixed>>
-	 */
+	/** @var array<string,array<string,mixed>> Loaded language files by absolute path; [] for a missing or unusable file. */
 	private array $cache = [];
 
 
-	/**
-	 * Cached active language code validated during initialization.
-	 *
-	 * @var string
-	 */
+	/** Active language from cfg locale.language. */
 	private string $language;
 
 
 	/**
-	 * Initialize the service and validate required configuration once.
-	 *
-	 * Behavior:
-	 * - Reads cfg.locale.language
-	 * - Validates the language format
-	 * - Stores the validated value for hot-path reuse
-	 * - Clears constructor options after initialization
+	 * Read and check the active language once.
 	 *
 	 * @return void
-	 * @throws TxtConfigException When locale.language is missing or invalid.
+	 * @throws \CitOmni\Infrastructure\Exception\TxtConfigException  When cfg locale.language is missing or not of the form xx or xx_YY.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		// locale.language is application cfg, so its absence is checked rather than assumed.
@@ -111,22 +90,28 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Resolve a translated string from a language file.
+	 * Look up one text in the active language.
 	 *
 	 * Behavior:
-	 * - Validates caller-supplied file and layer arguments
-	 * - Loads and caches the target language file on first access
-	 * - Returns the resolved value if it is string or scalar
-	 * - Logs and returns $default for missing, empty, or non-scalar values
-	 * - Applies %NAME%-style placeholder replacement when $vars is non-empty
+	 * - Returns the value of the key, with the placeholders applied. A scalar value that is not
+	 *   a string is cast to string.
+	 * - Returns $default, with the placeholders applied, when the file is missing or does not
+	 *   return an array, or when the value is missing, null, '' or not scalar.
+	 * - Each fallback to $default writes a txt.missing_key or txt.non_scalar_value line to
+	 *   txt.jsonl. A file that is missing or does not return an array also writes one
+	 *   txt.missing_file or txt.invalid_file_payload line, the first time this instance loads it.
+	 * - A placeholder is a %KEY% token, with each key of $vars uppercased.
 	 *
-	 * @param string $key Translation key to resolve.
-	 * @param string $file Relative language file name without .php extension.
-	 * @param string $layer Layer identifier. Use 'app' or 'vendor/package'.
-	 * @param string $default Fallback value when lookup cannot return a usable value.
-	 * @param array $vars Placeholder values mapped to %UPPERCASE_KEY%.
-	 * @return string Resolved text or fallback string.
-	 * @throws \InvalidArgumentException When $file or $layer is invalid.
+	 * Typical usage:
+	 *   $label = $this->app->txt->get('label_save', 'common', 'app', 'Save');
+	 *
+	 * @param  string  $key  Key in the language file.
+	 * @param  string  $file  File name without .php: letters, digits, /, _ and -, starting and ending with a letter or digit.
+	 * @param  string  $layer  'app' for the app's language files, or a package name vendor/package for the package's.
+	 * @param  string  $default  Text when the lookup finds no usable value.
+	 * @param  array<array-key,scalar|\Stringable|null>  $vars  Placeholder values by placeholder name.
+	 * @return string
+	 * @throws \InvalidArgumentException  When $file or $layer is malformed.
 	 */
 	public function get(string $key, string $file, string $layer = self::APP_LAYER, string $default = '', array $vars = []): string {
 		$this->assertValidFile($file);
@@ -157,11 +142,11 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Validate the language file identifier.
+	 * Reject a malformed language file name.
 	 *
-	 * @param string $file Relative language file name without extension.
+	 * @param  string  $file  File name without .php.
 	 * @return void
-	 * @throws \InvalidArgumentException When the file name is empty or unsafe.
+	 * @throws \InvalidArgumentException  When the name is empty, contains .. or does not match FILE_PATTERN.
 	 */
 	private function assertValidFile(string $file): void {
 		if (
@@ -175,13 +160,17 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Build the absolute path to a language file.
+	 * Return the absolute path of a language file.
 	 *
-	 * @param string $file Relative language file name without extension.
-	 * @param string $layer Layer identifier. Use 'app' or 'vendor/package'.
-	 * @param string $language Active language code.
-	 * @return string Absolute file path.
-	 * @throws \InvalidArgumentException When the layer identifier is invalid.
+	 * Behavior:
+	 * - Layer 'app' resolves below APP_LANGUAGE_PATH; any other layer below the package's
+	 *   language directory in VENDOR_PATH. Slashes around a package layer are ignored.
+	 *
+	 * @param  string  $file  Checked file name without .php.
+	 * @param  string  $layer  'app' or vendor/package.
+	 * @param  string  $language  Active language.
+	 * @return string
+	 * @throws \InvalidArgumentException  When the layer is neither 'app' nor a valid vendor/package.
 	 */
 	private function buildFilePath(string $file, string $layer, string $language): string {
 		if ($layer === self::APP_LAYER) {
@@ -201,23 +190,18 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Load and cache a language file payload.
+	 * Return the texts of one language file, loading it on first use.
 	 *
 	 * Behavior:
-	 * - Includes the file only once per absolute path
-	 * - Logs missing files exactly once on first access
-	 * - Normalizes missing or invalid payloads to an empty array
-	 * - Logs invalid payloads once on first load
+	 * - Includes each file at most once per instance.
+	 * - A missing file, or one that does not return an array, yields [] and writes one log line
+	 *   the first time.
 	 *
-	 * Notes:
-	 * - Missing files are treated as empty arrays for compatibility
-	 * - Files that return non-array values are treated as operational content issues
-	 *
-	 * @param string $filePath Absolute language file path.
-	 * @param string $file Relative language file name without extension.
-	 * @param string $key Translation key for diagnostics.
-	 * @param string $layer Layer identifier for diagnostics.
-	 * @return array<string, mixed> Normalized language data.
+	 * @param  string  $filePath  Absolute file path.
+	 * @param  string  $file  File name without .php, for the log.
+	 * @param  string  $key  Requested key, for the log.
+	 * @param  string  $layer  Layer, for the log.
+	 * @return array<string,mixed>  Texts by key.
 	 */
 	private function loadFileData(string $filePath, string $file, string $key, string $layer): array {
 		if (isset($this->cache[$filePath])) {
@@ -247,11 +231,11 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Apply placeholder replacement using %UPPERCASE_KEY% tokens.
+	 * Replace the %KEY% placeholders of a text, with each key of $vars uppercased.
 	 *
-	 * @param string $text Source text.
-	 * @param array $vars Placeholder values.
-	 * @return string Text with placeholder substitution applied.
+	 * @param  string  $text  Text with placeholders.
+	 * @param  array<array-key,scalar|\Stringable|null>  $vars  Placeholder values by placeholder name.
+	 * @return string
 	 */
 	private function applyVars(string $text, array $vars): string {
 		if ($vars === []) {
@@ -273,15 +257,12 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Log that a language file is missing.
+	 * Write a txt.missing_file line for a language file that does not exist.
 	 *
-	 * This is intentionally a single logged condition. The file is then cached
-	 * as an empty dataset so subsequent lookups remain cheap and deterministic.
-	 *
-	 * @param string $filePath Absolute language file path.
-	 * @param string $file Relative language file name without extension.
-	 * @param string $key Translation key.
-	 * @param string $layer Layer identifier.
+	 * @param  string  $filePath  Absolute file path.
+	 * @param  string  $file  File name without .php.
+	 * @param  string  $key  Requested key.
+	 * @param  string  $layer  Layer.
 	 * @return void
 	 */
 	private function logMissingFile(string $filePath, string $file, string $key, string $layer): void {
@@ -301,11 +282,11 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Log that a language file returned an invalid payload.
+	 * Write a txt.invalid_file_payload line for a language file that does not return an array.
 	 *
-	 * @param string $filePath Absolute language file path.
-	 * @param string $layer Layer identifier.
-	 * @param mixed $payload Raw included payload.
+	 * @param  string  $filePath  Absolute file path.
+	 * @param  string  $layer  Layer.
+	 * @param  mixed  $payload  What the file returned.
 	 * @return void
 	 */
 	private function logInvalidFilePayload(string $filePath, string $layer, mixed $payload): void {
@@ -324,11 +305,11 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Log that a translation key is missing or empty.
+	 * Write a txt.missing_key line for a key that is missing, null or ''.
 	 *
-	 * @param string $filePath Absolute language file path.
-	 * @param string $key Translation key.
-	 * @param string $layer Layer identifier.
+	 * @param  string  $filePath  Absolute file path.
+	 * @param  string  $key  Requested key.
+	 * @param  string  $layer  Layer.
 	 * @return void
 	 */
 	private function logMissingKey(string $filePath, string $key, string $layer): void {
@@ -347,12 +328,12 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Log that a resolved translation value is non-scalar.
+	 * Write a txt.non_scalar_value line for a value that is not scalar.
 	 *
-	 * @param string $filePath Absolute language file path.
-	 * @param string $key Translation key.
-	 * @param string $layer Layer identifier.
-	 * @param mixed $value Resolved raw value.
+	 * @param  string  $filePath  Absolute file path.
+	 * @param  string  $key  Requested key.
+	 * @param  string  $layer  Layer.
+	 * @param  mixed  $value  The value found.
 	 * @return void
 	 */
 	private function logNonScalarValue(string $filePath, string $key, string $layer, mixed $value): void {
@@ -372,9 +353,9 @@ class Txt extends BaseService {
 
 
 	/**
-	 * Build lightweight runtime context for log entries.
+	 * Return the runtime fields of a log line.
 	 *
-	 * @return array<string, string>
+	 * @return array{runtime:string,request_uri?:string}  runtime is http, with the request URI, when $_SERVER has a REQUEST_URI; cli otherwise.
 	 */
 	private function getRuntimeContext(): array {
 		$requestUri = $_SERVER['REQUEST_URI'] ?? null;

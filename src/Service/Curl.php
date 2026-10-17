@@ -20,39 +20,20 @@ use CitOmni\Infrastructure\Exception\CurlExecException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * Curl: Execute generic outbound requests via PHP cURL.
+ * Curl: Service that sends one outbound HTTP request per call through PHP's cURL extension.
  *
- * Behavior:
- * - Executes one outbound request per call with explicit, deterministic options.
- * - Throws on transport and configuration failures.
- * - Returns HTTP responses normally, including 4xx/5xx statuses.
- * - Supports file-based cookie persistence for login and session flows.
- * - Reuses DNS lookups and live connections across calls within this service instance
- *   (one request/process) when cfg `curl.reuse_connections` is enabled.
+ * Carries out requests with explicit, checked options and returns the response with its
+ * status, whatever the status is. Bodies are raw strings in both directions. It knows no API,
+ * payload format or business rule: What a request means, and what a 4xx or 5xx response
+ * means, belongs to the caller.
  *
- * Notes:
- * - Transport-only. No JSON schemas, API knowledge, or business rules.
- * - Request and response bodies are handled as raw strings.
- * - Response headers are captured through CURLOPT_HEADERFUNCTION and parsed into a
- *   lowercase associative array for the final response (after redirects, 1xx, and proxy CONNECT).
- *   HTTP trailer fields (after a chunked body) are not treated as headers.
- * - GET, HEAD, and POST use libcurl's native request modes, so redirects follow the
- *   method rules of the redirect status code. Other methods use CURLOPT_CUSTOMREQUEST.
- * - No SQL. No HTTP/CLI transport concerns of the host app.
- *
- * Typical usage:
- *   $response = $this->app->curl->execute([
- *       'url' => 'https://api.example.com/v1/items',
- *       'method' => 'POST',
- *       'headers' => [
- *           'Accept: application/json',
- *           'Content-Type: application/json',
- *       ],
- *       'body' => '{"hello":"world"}',
- *   ]);
- *
- * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When the request format is invalid.
- * @throws \CitOmni\Infrastructure\Exception\CurlExecException  When cURL fails at transport level.
+ * Rules:
+ * - Throw only for an invalid request and for a transfer that fails; an HTTP error status is
+ *   a normal response.
+ * - Check the whole request before any filesystem IO or network traffic.
+ * - Never let a query value that a request marks sensitive reach a log, an exception or the
+ *   returned URL metadata.
+ * - Share connections and DNS lookups only within one instance, never across PHP requests.
  */
 class Curl extends BaseService {
 
@@ -90,15 +71,19 @@ class Curl extends BaseService {
 	/** @var array<string,mixed> Request defaults merged under every request. */
 	private array $defaults = [];
 
+	/** Log transport failures through the log service. */
 	private bool $logErrors = true;
 
+	/** Log completed transfers through the log service. */
 	private bool $logSuccess = false;
 
+	/** Log file for both, or null for the log service's default file. */
 	private ?string $defaultLogFile = null;
 
+	/** Share DNS lookups and connections between the requests of this instance. */
 	private bool $reuseConnections = true;
 
-	/** Lazily created share handle holding the DNS cache and connection pool. */
+	/** Share handle with the DNS cache and the connection pool, or null until the first request that reuses them. */
 	private ?\CurlShareHandle $share = null;
 
 
@@ -107,20 +92,19 @@ class Curl extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Initialize request defaults and logging policy from cfg and service options.
+	 * Read the request defaults and the logging policy from cfg and the service options once.
 	 *
 	 * Behavior:
-	 * - Reads the package-owned `curl` cfg node (baseline shipped in Registry::CFG_COMMON).
-	 * - Applies service options on top: `defaults` (array), `log_errors`, `log_success`, `log_file`.
-	 *
-	 * Notes:
-	 * - `timeout`, `connect_timeout`, `verify_peer`, and `verify_host` are passed through uncast and
-	 *   validated per request, so fractional seconds survive and invalid cfg fails loudly instead of
-	 *   being silently cast (0 means "no timeout" / "no host verification" in libcurl).
-	 * - No IO. The share handle is created lazily on the first request.
+	 * - Service options win over cfg: defaults is merged over the request defaults from cfg,
+	 *   and log_errors, log_success and log_file replace the cfg keys of the same name.
+	 * - timeout, connect_timeout, verify_peer and verify_host stay unchecked until a request
+	 *   uses them, so fractional seconds survive and an invalid value fails the request instead
+	 *   of being cast to 0, which libcurl reads as no timeout or no host verification.
+	 * - Opens no connection.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When service option `defaults` contains unknown request keys.
+	 * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When service option defaults holds an unknown request key.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$cfg = $this->app->cfg->curl;
@@ -185,9 +169,10 @@ class Curl extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Execute one outbound cURL request.
+	 * Send one request and return the response, whatever its HTTP status.
 	 *
-	 * Request keys (all optional except `url`; missing keys fall back to service defaults; unknown keys are rejected):
+	 * Request keys, all optional except url. A missing key takes the service default, and an
+	 * unknown key is rejected:
 	 * - url               string                Absolute URL. Required.
 	 * - method            string                Method token, case-insensitive. Default GET.
 	 * - headers           list<string>          Raw "Name: value" lines. No CR/LF/NUL.
@@ -211,49 +196,52 @@ class Curl extends BaseService {
 	 * - auto_referer      bool                  Set Referer on redirects (only with follow_redirects).
 	 * - referer           string|null           Explicit Referer. No CR/LF/NUL.
 	 * - basic_auth        array|null            ['username' => string, 'password' => string].
-	 * - bearer_token      string|null           Adds "Authorization: Bearer <token>". No CR/LF/NUL.
+	 * - bearer_token      string|null           Adds "Authorization: Bearer TOKEN". No CR/LF/NUL.
 	 * - curl_options      array<int,mixed>      Raw CURLOPT_* overrides (integer keys only), applied last.
 	 * - log_file          string|null           Per-request log file override.
 	 * - log_context       array                 Extra log context.
 	 *
 	 * Behavior:
-	 * - Validates the full request before any filesystem IO (cookie paths are prepared last).
-	 * - GET/HEAD/POST use native libcurl modes; POST without body sends "Content-Length: 0".
-	 *   Other methods use CURLOPT_CUSTOMREQUEST, which libcurl keeps across redirects
-	 *   (pass CURLFOLLOW_OBEYCODE via curl_options on libcurl >= 8.13 to change that).
-	 * - Integer timeouts map to CURLOPT_TIMEOUT / CURLOPT_CONNECTTIMEOUT; fractional ones map to
-	 *   the *_MS variants, rounded up to at least 1 ms (never silently to "no timeout").
-	 * - The cURL handle is released right after the transfer, which is when libcurl writes the cookie jar.
-	 * - Sensitive query values are sent unchanged, but are redacted from logs, exceptions, and returned URL metadata.
+	 * - Checks the whole request before any filesystem IO. Cookie files that are written, and
+	 *   their directory, are created last, with modes 0600 and 0700.
+	 * - GET, HEAD and POST use libcurl's own modes, so a redirect follows the method rules of
+	 *   its status code; a POST without body sends Content-Length: 0. Any other method, and a
+	 *   GET with a body, uses CURLOPT_CUSTOMREQUEST, which libcurl keeps across redirects
+	 *   (CURLFOLLOW_OBEYCODE in curl_options changes that on libcurl 8.13+).
+	 * - A whole number of seconds maps to CURLOPT_TIMEOUT or CURLOPT_CONNECTTIMEOUT, a fraction
+	 *   to the _MS variant, rounded up to at least 1 ms and never down to no timeout.
+	 * - is_http_success is true for a 2xx status only.
+	 * - headers holds the fields of the final response head, after redirects, 1xx responses and
+	 *   a proxy CONNECT, with lowercase names; a repeated field becomes a list in received
+	 *   order. headers_raw holds every head as received. Both leave out HTTP trailers, and both
+	 *   are empty unless return_headers is true.
+	 * - info holds curl_getinfo() when capture_info is true, and is [] otherwise.
+	 * - The cookie jar is written before the method returns or throws.
+	 * - A query value of a sensitive_query_keys name is sent unchanged, but shows as
+	 *   [REDACTED] in request.url, effective_url, info, log lines and exceptions.
+	 * - A failed transfer writes a curl.error line when log_errors is on, and a completed
+	 *   transfer a curl.success line when log_success is on, both as cfg or service option.
+	 *   Neither is written while no log service is registered.
 	 *
 	 * Notes:
-	 * - Sub-second timeouts can fail immediately on libcurl builds using the synchronous resolver
-	 *   with signals enabled; set CURLOPT_NOSIGNAL via curl_options in that environment.
-	 * - With connection reuse, libcurl may transparently resend a request once when a reused
-	 *   connection turns out to be dead before any response byte arrived. Pass CURLOPT_FRESH_CONNECT
-	 *   and CURLOPT_FORBID_REUSE via curl_options to opt a request out.
-	 *
-	 * Response shape:
-	 *   [
-	 *     'request'         => ['method' => string, 'url' => string],
-	 *     'status_code'     => int,
-	 *     'is_http_success' => bool,                                 // 2xx
-	 *     'headers_raw'     => string,                               // All response heads as received, no trailers
-	 *     'headers'         => array<string,string|list<string>>,    // Final head only, lowercase names, no trailers
-	 *     'body'            => string,
-	 *     'body_bytes'      => int,
-	 *     'effective_url'   => string,
-	 *     'content_type'    => string|null,
-	 *     'info'            => array<string,mixed>,                  // Empty unless capture_info
-	 *   ]
+	 * - Sub-second timeouts can fail at once on libcurl builds that use the synchronous resolver
+	 *   with signals; set CURLOPT_NOSIGNAL in curl_options there.
+	 * - With connection reuse, libcurl may resend a request once when a reused connection turns
+	 *   out to be dead before any response byte arrived. CURLOPT_FRESH_CONNECT and
+	 *   CURLOPT_FORBID_REUSE in curl_options opt a request out.
 	 *
 	 * Typical usage:
-	 *   $response = $this->app->curl->execute(['url' => 'https://example.com/health']);
+	 *   $response = $this->app->curl->execute([
+	 *       'url'     => 'https://api.example.com/v1/items',
+	 *       'method'  => 'POST',
+	 *       'headers' => ['Accept: application/json', 'Content-Type: application/json'],
+	 *       'body'    => '{"hello":"world"}',
+	 *   ]);
 	 *
-	 * @param  array<string,mixed>  $request  Request configuration.
-	 * @return array<string,mixed>  Normalized response payload (see shape above).
-	 * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When the request is invalid or cookie paths cannot be prepared.
-	 * @throws \CitOmni\Infrastructure\Exception\CurlExecException  When cURL fails to initialize, rejects an option, or fails at transport level.
+	 * @param  array<string,mixed>  $request  Request keys as listed above.
+	 * @return array{request:array{method:string,url:string},status_code:int,is_http_success:bool,headers_raw:string,headers:array<string,string|list<string>>,body:string,body_bytes:int,effective_url:string,content_type:string|null,info:array<string,mixed>}
+	 * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When the request is invalid or a cookie file cannot be prepared.
+	 * @throws \CitOmni\Infrastructure\Exception\CurlExecException  When cURL cannot start, rejects an option or fails at transport level.
 	 */
 	public function execute(array $request): array {
 		$request = $this->normalizeRequest($request);
@@ -595,7 +583,7 @@ class Curl extends BaseService {
 	 * - Resolves the User-Agent to apply via CURLOPT_USERAGENT unless an explicit header is present.
 	 *
 	 * @param  array<string,mixed>  $request  Request data.
-	 * @return array<string,mixed>  Request with final header list and `_resolved_user_agent`.
+	 * @return array<string,mixed>  Request with the final header list and _resolved_user_agent.
 	 * @throws \CitOmni\Infrastructure\Exception\CurlConfigException  When headers are invalid or auth sources conflict.
 	 */
 	private function normalizeHeaders(array $request): array {
@@ -646,7 +634,7 @@ class Curl extends BaseService {
 	 * Normalize cookie-related request fields and prepare cookie paths.
 	 *
 	 * Behavior:
-	 * - `cookie_store` sets both `cookie_file` and `cookie_jar`.
+	 * - cookie_store sets both cookie_file and cookie_jar.
 	 * - Read-only cookie files may be missing; write targets are created (directory 0700, file 0600).
 	 *
 	 * @param  array<string,mixed>  $request  Request data.
@@ -1059,12 +1047,12 @@ class Curl extends BaseService {
 	 * Build cURL options from a normalized request.
 	 *
 	 * Behavior:
-	 * - Service-managed options first, then `curl_options` on top.
+	 * - Service-managed options first, then curl_options on top.
 	 * - Request method mapping:
-	 *   1) HEAD -> CURLOPT_NOBODY
-	 *   2) GET without body -> libcurl default (plain GET)
-	 *   3) POST -> CURLOPT_POSTFIELDS (empty string when body is null)
-	 *   4) Anything else (incl. GET with body) -> CURLOPT_CUSTOMREQUEST (+ CURLOPT_POSTFIELDS when body is set)
+	 *     - HEAD -> CURLOPT_NOBODY
+	 *     - GET without body -> libcurl default (plain GET)
+	 *     - POST -> CURLOPT_POSTFIELDS (empty string when body is null)
+	 *     - Anything else (incl. GET with body) -> CURLOPT_CUSTOMREQUEST (+ CURLOPT_POSTFIELDS when body is set)
 	 *
 	 * @param  array<string,mixed>  $request         Normalized request.
 	 * @param  \Closure|null        $headerFunction  Header collector, or null when headers are not captured.
@@ -1252,7 +1240,8 @@ class Curl extends BaseService {
 	 * @param  array<string,mixed>  $info         curl_getinfo() result.
 	 * @param  string               $headersRaw   All response head bytes, trailers excluded ('' when not captured).
 	 * @param  list<string>         $headerLines  Field lines of the final header block.
-	 * @return array<string,mixed>  Normalized response.
+	 * @return array<string,mixed>  Response in the shape that execute() returns.
+	 * @see \CitOmni\Infrastructure\Service\Curl::execute()  The response shape.
 	 */
 	private function buildResponse(array $request, string $body, array $info, string $headersRaw, array $headerLines): array {
 		$statusCode = (int)($info['http_code'] ?? 0);

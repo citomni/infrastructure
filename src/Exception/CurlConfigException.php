@@ -16,15 +16,11 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Thrown when a Curl request configuration is invalid.
+ * CurlConfigException: Exception for a request or service option that the curl service rejects.
  *
- * Behavior:
- * - Represents fail-fast validation errors before transport execution.
- *
- * Notes:
- * - Typical causes include missing required keys, invalid types, or contradictory request options.
- *
- * @throws void
+ * Marks a failure before any transfer starts, such as an unknown or missing request key, a
+ * value of the wrong type, contradictory options or a cookie path that cannot be prepared.
+ * Correcting the request belongs to the caller.
  */
 class CurlConfigException extends CurlException {
 }

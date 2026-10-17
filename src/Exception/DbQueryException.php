@@ -16,67 +16,53 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Query-level database exception.
+ * DbQueryException: Exception for a database statement or transaction call that fails.
  *
- * Thrown when the connection exists, but a database operation fails during
- * query preparation, parameter binding, execution, transaction control, or
- * result handling.
+ * Marks a failure of the caller's work rather than of the connection setup: invalid SQL or
+ * arguments, a failed prepare, bind or execute, a missing result set, or a transaction call
+ * that is not allowed in the current state. Classifying the server error belongs here;
+ * deciding what to do about it belongs to the caller.
  *
- * Behavior:
- * - Used for invalid SQL, prepare() failures, bind_param() failures,
- *   execute() failures, transaction failures, and result-state issues.
- * - Message payload may include SQL text and parameter types, but not raw
- *   parameter values.
- * - Extends DbException so callers may either catch this specifically or
- *   catch DbException for all DB-layer failures.
- *
- * Typical usage:
- *   try {
- *   	$row = $this->app->db->fetchRow('SELECT * FROM users WHERE id = ?', [$id]);
- *   } catch (DbQueryException $e) {
- *   	// Query was invalid or execution failed.
- *   }
+ * Rules:
+ * - The code is the server's error number whenever the server reported one; the classifiers
+ *   read it.
+ * - A message never contains a bound parameter value, which may be a secret or personal
+ *   data. SQL text and parameter types are allowed.
  */
 class DbQueryException extends DbException {
+
+	/** Server error number ER_DUP_ENTRY: A unique key already holds the value. */
 	private const MYSQL_DUPLICATE_ENTRY_CODE = 1062;
+
+	/** Server error number ER_LOCK_DEADLOCK: The engine rolled the transaction back to break a deadlock. */
 	private const MYSQL_DEADLOCK_CODE        = 1213;
 
 	/**
-	 * Check whether this query failure is a duplicate-entry violation.
-	 *
-	 * Behavior:
-	 * - Returns true for MySQL/MariaDB duplicate-key errors.
-	 * - Uses the exception code passed by the Db service from mysqli.
+	 * Tell whether the statement failed on a duplicate key.
 	 *
 	 * Notes:
-	 * - This helper is additive and does not change existing exception behavior.
-	 * - Keep this narrow; callers should still verify the relevant domain state.
+	 * - Only classifies. Whether the domain state really conflicts is for the caller to check.
 	 *
-	 * @return bool True when the query failed because a unique key already exists.
+	 * @return bool  True for server error 1062, a value that a unique key already holds.
 	 */
 	public function isDuplicateEntry(): bool {
 		return $this->getCode() === self::MYSQL_DUPLICATE_ENTRY_CODE;
 	}
 
 	/**
-	 * Check whether this query failure is a transaction deadlock.
+	 * Tell whether the statement failed on a transaction deadlock.
 	 *
 	 * Behavior:
-	 * - Returns true only for a real deadlock (MySQL/MariaDB error 1213,
-	 *   ER_LOCK_DEADLOCK), where the engine already rolled the transaction back
-	 *   and restarting the whole transaction is the sanctioned recovery.
-	 * - Uses the exception code passed by the Db service from mysqli.
+	 * - True only for server error 1213, where the engine has already rolled the whole
+	 *   transaction back and restarting the transaction is the sanctioned recovery.
+	 * - False for a lock wait timeout (error 1205): Only the waiting statement is rolled back
+	 *   there, so it needs other handling.
 	 *
 	 * Notes:
-	 * - Error 1213 is shared by MySQL 8.0.16+ and MariaDB 10.6+.
-	 * - A lock-wait timeout (error 1205, ER_LOCK_WAIT_TIMEOUT) is deliberately NOT
-	 *   a deadlock: only the waiting statement is rolled back and the semantics
-	 *   differ, so it must not be reported here.
-	 * - This helper is additive and does not change existing exception behavior.
-	 *   It only classifies; it does not decide whether or how to retry - that is
-	 *   the workflow owner's responsibility.
+	 * - Error 1213 means the same on MySQL 8.0.16+ and MariaDB 10.6+.
+	 * - Only classifies. Whether and how to retry belongs to the owner of the workflow.
 	 *
-	 * @return bool True when the query failed because of a transaction deadlock.
+	 * @return bool
 	 */
 	public function isDeadlock(): bool {
 		return $this->getCode() === self::MYSQL_DEADLOCK_CODE;

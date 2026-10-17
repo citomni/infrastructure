@@ -22,89 +22,50 @@ use CitOmni\Infrastructure\Repository\DatabaseSchemaRepository;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * BruteForce: Transport-agnostic brute force protection with per-context config.
+ * BruteForce: Service that throttles repeated failures of an action per identifier and per IP address.
  *
- * Provides a reusable API for tracking, evaluating, and clearing failed attempts
- * per identifier (e.g. email) and/or client IP. Each context is independently
- * configured via the `security.bruteforce` config node.
- * Subject values are normalized (trimmed, lowercased) and SHA-256 hashed
- * before persistence to ensure consistent lookups and minimize data exposure.
+ * Counts the failures of a protected action, such as a login, within a window per context
+ * and subject, and blocks a subject that reaches the context's limit for a fixed time. A
+ * subject is an identifier, such as an email address, or a client IP address; the two are
+ * counted and blocked independently. What a block means for the response belongs to the
+ * caller, and the SQL belongs to BruteForceRepository.
  *
- * Behavior:
- * - Uses bucketed counters (one row per context + subject type + subject hash)
- *   instead of per-attempt event logging. This keeps row count bounded and
- *   queries predictable regardless of traffic volume.
- * - Contexts are defined entirely in config - no hardcoded action types.
- * - Both identifier-based and IP-based throttling are evaluated independently.
- *   A request is blocked if either dimension has an active blocked_until timestamp.
- * - All IPs are treated equally - no known-IP relaxation.
- * - SQL is fully delegated to BruteForceRepository; this service contains zero SQL.
- * - status() is read-only and never modifies state.
- * - record() is write-only and does not evaluate block status.
- * - clear() removes the explicitly requested bucket(s) for the given context.
- * - First inserts use INSERT IGNORE for race-safe bucket creation under
- *   concurrent requests, followed by a normal read/update flow.
- * - Identifiers are normalized (trim + mb_strtolower) and IPs are normalized
- *   (trim + strtolower) before hashing, so callers do not need to normalize.
- * - The transport sentinels 'unknown' and 'cli' (case-insensitive) are accepted
- *   as IP input but never form an IP subject, so such calls get identifier-only
- *   throttling. See status(), record(), and clear().
- *
- * Notes:
- * - Requires citomni/infrastructure (Db service) to be available.
- * - The `bruteforce` config node must exist and contain at least one context.
- * - Config keys (login, 2fa, etc.) are arbitrary - any string works as a context.
- * - Config is cached as a plain array in init(); no Cfg magic on hot paths.
- * - Designed for low overhead: bounded rows, cheap lookups, no runtime reflection.
+ * Rules:
+ * - Store a subject only as the SHA-256 hash of its normalized value.
+ * - Normalize subjects the same way in every method, so lookups, counts and deletions agree.
+ * - Treat every IP address alike; there is no allowlist.
  *
  * Typical usage:
- *   // Before attempting action:
- *   $s = $this->app->bruteForce->status('login', $email, $ip);
- *   if ($s['blocked']) { /* respond with $s['retry_after_seconds'] *​/ }
- *
- *   // After failed attempt:
+ *   $status = $this->app->bruteForce->status('login', $email, $ip);
+ *   if ($status['blocked']) {
+ *       // Refuse the attempt; retry_after_seconds says for how long.
+ *   }
+ *   // After a failed attempt:
  *   $this->app->bruteForce->record('login', $email, $ip);
- *
- *   // After successful attempt (identifier only - see NAT note on clear()):
+ *   // After a successful attempt:
  *   $this->app->bruteForce->clear('login', $email);
- *
- * Required config (example):
- *   'security' => [
- *       'bruteforce' => [
- *           'default' => [
- *               'max_identifier_attempts' => 5,
- *               'max_ip_attempts'         => 25,
- *               'interval_minutes'        => 15,
- *               'retry_after_seconds'     => 900,
- *               'prune_after_seconds'     => 604800, // optional, default: 7 days
- *           ],
- *       ],
- *   ]
- *
- * @throws BruteForceConfigException When the bruteforce config node is empty or a context is missing or invalid.
- * @throws \InvalidArgumentException On invalid input (empty context, no subjects, etc.).
  */
 class BruteForce extends BaseService {
 
-	/** @var array<string, array<string, mixed>> Raw context configs keyed by context name. */
+	/** @var array<array-key,mixed> Cfg security.bruteforce: the settings of each context, keyed by context name. */
 	private array $contexts = [];
 
-	/** @var array<string, array{max_identifier_attempts: int, max_ip_attempts: int, interval_minutes: int, retry_after_seconds: int}> Validated context configs, cached after first resolve. */
+	/** @var array<string,array{max_identifier_attempts:int,max_ip_attempts:int,interval_minutes:int,retry_after_seconds:int}> Checked limits by context name, filled on first use of a context. */
 	private array $resolvedContexts = [];
 
-	/** @var BruteForceRepository Persistence layer for counter rows. */
+	/** Repository of the counters. */
 	private BruteForceRepository $repo;
 
 
 	/**
-	 * One-time initialization. Reads and caches the security.bruteforce config
-	 * node as a plain array and instantiates the repository.
+	 * Read cfg security.bruteforce once.
 	 *
 	 * Behavior:
-	 * - Fails fast if the `security.bruteforce` config node is empty.
-	 * - Per-context validation is deferred to first access (resolveContext).
+	 * - The limits of a context are checked on its first use, not here.
 	 *
 	 * @return void
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When cfg security.bruteforce holds no context.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		// Package-owned cfg: Assumes the Registry baseline for security.bruteforce, so no isset() guard.
@@ -121,16 +82,13 @@ class BruteForce extends BaseService {
 	
 	
 	/**
-	 * Assert that the brute force persistence table is installed.
+	 * Fail when the counter table is not installed in the current database.
 	 *
 	 * Behavior:
-	 * - Performs a cheap metadata lookup against the active database.
-	 * - Throws a brute-force-specific setup exception when storage is missing.
-	 * - Does not validate context config; normal config validation still happens
-	 *   through init() and resolveContext().
+	 * - Checks the schema only, not the cfg of any context.
 	 *
 	 * @return void
-	 * @throws BruteForceSetupException When the required table is missing.
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceSetupException  When the table does not exist; the exception names it and the schema file to run.
 	 */
 	public function assertStorageReady(): void {
 		$schemaRepo = new DatabaseSchemaRepository($this->app);
@@ -146,53 +104,31 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * status: Evaluate the current block state for an identifier and/or IP in a given context.
+	 * Tell whether an identifier or an IP address is blocked in a context, without changing state.
 	 *
-	 * Read-only - does not modify any state. Returns an associative array
-	 * describing whether the request should be blocked, why, how long the
-	 * block lasts, and how many attempts remain per dimension.
+	 * Call it before the protected action. Each given subject is checked on its own; the result
+	 * is blocked when either one is.
 	 *
 	 * Behavior:
-	 * - At least one of $identifier or $ip must be non-null and non-empty.
-	 * - An IP equal to a transport sentinel ('unknown' or 'cli', case-insensitive)
-	 *   counts as provided input but yields no IP subject. Without an identifier,
-	 *   the result is "not blocked" with zero attempts and no repository lookup.
-	 * - If $identifier is null, only IP-based throttling is evaluated (and vice versa).
-	 * - A subject is blocked when blocked_until > now, regardless of whether the
-	 *   rolling window has technically expired.
-	 * - If the rolling window has expired and there is no active block, the counter
-	 *   is treated as zero (stale data is ignored without a write).
-	 * - If both dimensions are blocked, reason is 'both' and retry_after_seconds
-	 *   reflects the longer remaining cooldown.
-	 * - retry_after_seconds is a dynamic countdown: blocked_until - now.
-	 * - Inputs are normalized before lookup (trim + lowercase).
+	 * - A subject is blocked until its block ends, also when its window has expired meanwhile.
+	 * - Attempts count only within the current window: An expired window without a block
+	 *   counts as 0 attempts.
+	 * - reason is 'identifier', 'ip' or 'both' while blocked, and null otherwise. With both
+	 *   blocked, blocked_until and retry_after_seconds follow the later end.
+	 * - retry_after_seconds counts down to blocked_until, and is 0 when not blocked.
+	 * - identifier_remaining and ip_remaining are the limits minus the attempts, never below 0.
+	 * - An IP of 'unknown' or 'cli', in any letter case, is no IP subject. Without an
+	 *   identifier, the result is not blocked, with 0 attempts.
 	 *
 	 * Typical usage:
-	 *   Called before attempting the protected action.
+	 *   $status = $this->app->bruteForce->status('api_auth', null, $ip);
 	 *
-	 * Examples:
-	 *
-	 *   $s = $this->app->bruteForce->status('login', $email, $ip);
-	 *   if ($s['blocked']) {
-	 *       // $s['retry_after_seconds'] for Retry-After header
-	 *       // $s['identifier_remaining'] for "X attempts left" message
-	 *   }
-	 *
-	 *   // IP-only (e.g. API auth without username):
-	 *   $s = $this->app->bruteForce->status('api_auth', null, $ip);
-	 *
-	 * Failure:
-	 * - BruteForceConfigException if the context is not configured.
-	 * - \InvalidArgumentException if $context is empty or both subjects are null/empty.
-	 *
-	 * @param string  $context    Context name matching a key in security.bruteforce config.
-	 * @param ?string $identifier User identifier (email, username, etc.). Null for IP-only checks.
-	 * @param ?string $ip         Client IP address (IPv4 or IPv6). Null for identifier-only checks.
-	 *
-	 * @return array{blocked: bool, reason: ?string, retry_after_seconds: int, blocked_until: ?int, identifier_attempts: int, ip_attempts: int, identifier_remaining: int, ip_remaining: int, max_identifier_attempts: int, max_ip_attempts: int, interval_minutes: int}
-	 *
-	 * @throws BruteForceConfigException When the context is not configured.
-	 * @throws \InvalidArgumentException On empty $context, invalid $ip, or no subjects provided.
+	 * @param  string  $context  Context name, a key under cfg security.bruteforce; trimmed.
+	 * @param  string|null  $identifier  Identifier such as an email address, or null for none; trimmed and lowercased.
+	 * @param  string|null  $ip  Client IPv4 or IPv6 address, or null for none; trimmed and lowercased.
+	 * @return array{blocked:bool,reason:'identifier'|'ip'|'both'|null,retry_after_seconds:int,blocked_until:int|null,identifier_attempts:int,ip_attempts:int,identifier_remaining:int,ip_remaining:int,max_identifier_attempts:int,max_ip_attempts:int,interval_minutes:int}  blocked_until is a UNIX timestamp; the max_* and interval_minutes keys are the context's limits.
+	 * @throws \InvalidArgumentException  When the context is empty, the IP address is invalid, or neither subject is given.
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured, or one of its limits is missing or below 1.
 	 */
 	public function status(string $context, ?string $identifier = null, ?string $ip = null): array {
 
@@ -295,52 +231,36 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * record: Register a failed attempt for the given context and subject(s).
+	 * Count one failed attempt of an identifier and an IP address in a context.
 	 *
-	 * Write-only - does not evaluate or return block status. Call this after a
-	 * failed action (wrong password, invalid 2FA code, etc.). Callers will
-	 * typically check status() first, but record() does not require a prior
-	 * status() call to function correctly.
+	 * Call it after the protected action has failed; it needs no status() call before it. Each
+	 * given subject is counted on its own, and a subject that reaches its limit is blocked for
+	 * the context's retry_after_seconds.
 	 *
 	 * Behavior:
-	 * - At least one of $identifier or $ip must be non-null and non-empty.
-	 * - An IP equal to a transport sentinel ('unknown' or 'cli', case-insensitive)
-	 *   counts as provided input but yields no IP subject. Without an identifier,
-	 *   the call records nothing.
-	 * - Inputs are normalized before recording (trim + lowercase).
-	 * - If a subject is currently blocked (blocked_until > now), the call is
-	 *   silently ignored for that subject - no counter modification occurs.
-	 * - If the rolling window has expired (and no active block), the counter is
-	 *   reset to 1 and a fresh window is started.
-	 * - If the rolling window is active, the counter is incremented. When the
-	 *   incremented count reaches the configured maximum, blocked_until is set
-	 *   to now + retry_after_seconds.
-	 * - First-ever inserts go through BruteForceRepository::insertIfMissing().
-	 *   Duplicate creates from concurrent requests are ignored without error,
-	 *   and an existing row continues through the block/window/update logic.
+	 * - A blocked subject stays unchanged: Attempts during a block neither count nor extend it.
+	 * - A subject without a counter, or whose window has expired, starts a new window with one
+	 *   attempt.
+	 * - Otherwise the attempt is counted, and when the attempts reach the limit, the subject is
+	 *   blocked from now for retry_after_seconds.
+	 * - Concurrent first attempts of one subject create one counter and are all counted.
+	 * - An IP of 'unknown' or 'cli', in any letter case, is no IP subject. Without an
+	 *   identifier, nothing is counted.
+	 *
+	 * Notes:
+	 * - The limit is compared with the attempts read before the count, so under concurrent
+	 *   failures of one subject a block can start one attempt late.
 	 *
 	 * Typical usage:
-	 *   Called after the protected action has failed.
-	 *
-	 * Examples:
-	 *
 	 *   $this->app->bruteForce->record('login', $email, $ip);
 	 *
-	 *   // IP-only:
-	 *   $this->app->bruteForce->record('api_auth', null, $ip);
-	 *
-	 * Failure:
-	 * - BruteForceConfigException if the context is not configured.
-	 * - \InvalidArgumentException if $context is empty, $ip is invalid, or no subjects.
-	 *
-	 * @param string  $context    Context name matching a key in bruteforce config.
-	 * @param ?string $identifier User identifier. Null to skip identifier recording.
-	 * @param ?string $ip         Client IP. Null to skip IP recording.
-	 *
+	 * @param  string  $context  Context name, a key under cfg security.bruteforce; trimmed.
+	 * @param  string|null  $identifier  Identifier such as an email address, or null for none; trimmed and lowercased.
+	 * @param  string|null  $ip  Client IPv4 or IPv6 address, or null for none; trimmed and lowercased.
 	 * @return void
-	 *
-	 * @throws BruteForceConfigException When the context is not configured.
-	 * @throws \InvalidArgumentException On empty $context, invalid $ip, or no subjects provided.
+	 * @throws \InvalidArgumentException  When the context is empty, the IP address is invalid, or neither subject is given.
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured, or one of its limits is missing or below 1.
+	 * @throws \RuntimeException  When a counter disappears between its creation attempt and its read, such as by a concurrent clear().
 	 */
 	public function record(string $context, ?string $identifier = null, ?string $ip = null): void {
 
@@ -376,63 +296,31 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * clear: Remove explicitly requested brute force bucket(s) for a context.
+	 * Delete the counter of an identifier, an IP address or both in a context.
 	 *
-	 * Call after a successful action or from an explicit unblock flow. At least one
-	 * of $identifier or $ip must be non-null and non-empty.
+	 * Call it after a successful attempt, usually with the identifier only, or from a flow that
+	 * unblocks a subject on purpose. Identifier and IP address have separate counters, so each
+	 * given subject is cleared on its own; no counter combines the two.
 	 *
 	 * Behavior:
-	 * - This service tracks identifier and IP as two independent bucket types.
-	 * - If only $identifier is provided, only the identifier bucket is removed.
-	 * - If only $ip is provided, only the IP bucket is removed.
-	 * - An IP equal to a transport sentinel ('unknown' or 'cli', case-insensitive)
-	 *   counts as provided input but yields no IP subject. Without an identifier,
-	 *   the call deletes nothing.
-	 * - If both are provided, both independent buckets are removed.
-	 * - This is NOT a combined triple-match on (context + identifier + ip), because
-	 *   the underlying data model does not store a separate combined bucket.
-	 * - Inputs are normalized before deletion (trim + lowercase normalization).
-	 * - Does not require the context to exist in config (allows cleanup of removed contexts).
+	 * - Ends the block of each given subject, and its count.
+	 * - Works for a context that is no longer configured.
+	 * - An IP of 'unknown' or 'cli', in any letter case, is no IP subject. Without an
+	 *   identifier, nothing is deleted.
 	 *
-	 * Operational guidance:
-	 * - Normal success flow should typically clear only the identifier bucket:
-	 *   $this->app->bruteForce->clear('login', $email);
-	 * - This matches the practical account-centric lockout model used by common
-	 *   authentication guidance and avoids implicitly trusting IP as identity.
-	 * - Clearing the IP bucket should be explicit, because it affects all activity
-	 *   aggregated into that IP bucket for the context.
-	 *
-	 * NAT / shared-IP warning:
-	 * - Clearing the IP bucket on success resets the counter for all traffic that
-	 *   shares that IP in this context (e.g. shared NAT, corporate proxy, mobile carrier).
-	 * - Therefore, passing $ip in normal success flows is usually NOT recommended.
-	 * - Pass $ip only when you deliberately want to clear the IP bucket, such as
-	 *   from an admin unblock tool or a diagnostic workflow.
+	 * Notes:
+	 * - Clearing an IP address resets it for all traffic from that address in the context,
+	 *   such as everyone behind one NAT, proxy or mobile carrier. Pass $ip only to unblock that
+	 *   address deliberately, such as from an admin tool, not after every successful attempt.
 	 *
 	 * Typical usage:
-	 *   Called after the protected action has succeeded, usually with identifier only.
-	 *
-	 * Examples:
-	 *
-	 *   // Recommended normal success flow:
 	 *   $this->app->bruteForce->clear('login', $email);
 	 *
-	 *   // Explicit IP unblock:
-	 *   $this->app->bruteForce->clear('login', null, $ip);
-	 *
-	 *   // Explicit full cleanup of both tracked dimensions:
-	 *   $this->app->bruteForce->clear('login', $email, $ip);
-	 *
-	 * Failure:
-	 * - \InvalidArgumentException if $context is empty, $ip is invalid, or no subjects.
-	 *
-	 * @param string  $context    Context name.
-	 * @param ?string $identifier User identifier. Null skips identifier bucket removal.
-	 * @param ?string $ip         Client IP. Null skips IP bucket removal.
-	 *
+	 * @param  string  $context  Context name; trimmed.
+	 * @param  string|null  $identifier  Identifier such as an email address, or null for none; trimmed and lowercased.
+	 * @param  string|null  $ip  Client IPv4 or IPv6 address, or null for none; trimmed and lowercased.
 	 * @return void
-	 *
-	 * @throws \InvalidArgumentException On empty $context, invalid $ip, or no subjects provided.
+	 * @throws \InvalidArgumentException  When the context is empty, the IP address is invalid, or neither subject is given.
 	 */
 	public function clear(string $context, ?string $identifier = null, ?string $ip = null): void {
 
@@ -454,22 +342,24 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * prune: Delete old counter rows based on per-context prune_after_seconds config.
+	 * Delete counters that have not changed for a long time, and return how many were deleted.
 	 *
-	 * Intended for periodic cleanup via a CLI command or scheduled task.
-	 * Iterates all configured contexts and removes rows where updated_at is
-	 * older than the context's prune_after_seconds (default: 604800 = 7 days).
-	 * After per-context cleanup, performs an orphan sweep: rows belonging to
-	 * contexts no longer present in security.bruteforce are pruned at a 30-day threshold.
+	 * Meant for a scheduled cleanup, such as a daily CLI command.
+	 *
+	 * Behavior:
+	 * - Deletes the counters of each configured context that have not changed for its
+	 *   prune_after_seconds, or for 604800 seconds (7 days) when that key is missing or below 1.
+	 * - Deletes the counters of every other context after 2592000 seconds (30 days) without a
+	 *   change. A context whose cfg value is not an array counts as not configured.
+	 *
+	 * Notes:
+	 * - A prune_after_seconds below the context's retry_after_seconds lets prune() end a block
+	 *   early.
 	 *
 	 * Typical usage:
-	 *   Called from a CLI command on a cron schedule (e.g. daily).
-	 *
-	 * Examples:
-	 *
 	 *   $deleted = $this->app->bruteForce->prune();
 	 *
-	 * @return int Total number of deleted rows (across all contexts + orphans).
+	 * @return int  Number of deleted counters.
 	 */
 	public function prune(): int {
 
@@ -500,31 +390,28 @@ class BruteForce extends BaseService {
 	}
 
 
-
-
-
-
-	// -------------------------------------------------------------------------
-	// Internal
-	// -------------------------------------------------------------------------
+	// ----------------------------------------------------------------
+	// Internal helpers
+	// ----------------------------------------------------------------
 
 	/**
-	 * Record a failed attempt for a single subject dimension.
+	 * Count one failed attempt of one subject.
 	 *
-	 * Uses a race-safe insert-then-read flow:
-	 * - insertIfMissing() creates the bucket with attempt_count = 1 when absent
-	 * - concurrent duplicate creates are ignored without error
-	 * - when the row already exists, normal block/window/update logic applies
+	 * Behavior:
+	 * - Creates the counter with one attempt when it is missing, so that concurrent first
+	 *   attempts create one counter; otherwise applies the block and window rules to the
+	 *   existing counter.
 	 *
-	 * @param string $context           Context name.
-	 * @param string $subjectType       'identifier' or 'ip'.
-	 * @param string $subjectValue      Normalized subject value (will be hashed).
-	 * @param int    $maxAttempts       Configured maximum attempts for this dimension.
-	 * @param int    $intervalMinutes   Rolling window length in minutes.
-	 * @param int    $retryAfterSeconds Block duration in seconds.
-	 * @param int    $now               Current UNIX timestamp.
-	 *
+	 * @param  string  $context  Checked context name.
+	 * @param  string  $subjectType  'identifier' or 'ip'.
+	 * @param  string  $subjectValue  Normalized subject; hashed here.
+	 * @param  int  $maxAttempts  Attempts at which the subject is blocked.
+	 * @param  int  $intervalMinutes  Length of the window in minutes.
+	 * @param  int  $retryAfterSeconds  Length of a block in seconds.
+	 * @param  int  $now  Current UNIX timestamp.
 	 * @return void
+	 * @throws \RuntimeException  When the counter disappears between the creation attempt and the read.
+	 * @see \CitOmni\Infrastructure\Service\BruteForce::record()  The rules for a failed attempt.
 	 */
 	private function recordSubject(string $context, string $subjectType, string $subjectValue, int $maxAttempts, int $intervalMinutes, int $retryAfterSeconds, int $now): void {
 
@@ -565,14 +452,11 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * Resolve and validate the config for a given context. Results are cached
-	 * after first validation to avoid repeated parsing.
+	 * Return the checked limits of one context, checking them on its first use.
 	 *
-	 * @param string $context Context name (pre-trimmed by validateContext).
-	 *
-	 * @return array{max_identifier_attempts: int, max_ip_attempts: int, interval_minutes: int, retry_after_seconds: int}
-	 *
-	 * @throws BruteForceConfigException If the context is missing or has invalid values.
+	 * @param  string  $context  Trimmed context name.
+	 * @return array{max_identifier_attempts:int,max_ip_attempts:int,interval_minutes:int,retry_after_seconds:int}
+	 * @throws \CitOmni\Infrastructure\Exception\BruteForceConfigException  When the context is not configured as an array, or one of the four limits is missing or below 1.
 	 */
 	private function resolveContext(string $context): array {
 
@@ -628,13 +512,11 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * Validate that the context name is non-empty and return trimmed value.
+	 * Return a context name trimmed, rejecting an empty one.
 	 *
-	 * @param string $context Context name.
-	 *
-	 * @return string Trimmed context name.
-	 *
-	 * @throws \InvalidArgumentException If empty after trimming.
+	 * @param  string  $context  Context name as the caller passed it.
+	 * @return string
+	 * @throws \InvalidArgumentException  When the name is empty after trimming.
 	 */
 	private function validateContext(string $context): string {
 		$context = \trim($context);
@@ -648,25 +530,19 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * Normalize and validate subject inputs.
+	 * Normalize and check the subjects of one call.
 	 *
-	 * At least one of identifier or ip must be non-null and non-empty.
-	 * Identifiers are trimmed and lowercased for consistent hashing regardless
-	 * of caller casing. UTF-8 is used explicitly for deterministic multibyte
-	 * case folding when mbstring is available. IPs are trimmed and lowercased
-	 * for IPv6 hex consistency, then validated with filter_var.
+	 * Behavior:
+	 * - An identifier is trimmed and lowercased, as UTF-8 when mbstring is available. '' after
+	 *   trimming means no identifier.
+	 * - An IP address is trimmed, lowercased so IPv6 hex digits compare alike, and checked.
+	 *   'unknown' and 'cli' mean no IP subject but still count as given, so a call with only
+	 *   such an IP returns two nulls instead of throwing.
 	 *
-	 * The transport sentinels 'unknown' and 'cli' are mapped to a null IP subject
-	 * before validation. They still count as provided input, so a call with only
-	 * a sentinel IP returns two null subjects instead of throwing. Only a call
-	 * without any usable input (null/empty identifier and null/empty IP) throws.
-	 *
-	 * @param ?string $identifier Identifier value.
-	 * @param ?string $ip         IP address.
-	 *
-	 * @return array{identifier: ?string, ip: ?string} Normalized values or null.
-	 *
-	 * @throws \InvalidArgumentException On invalid IP or no subjects.
+	 * @param  string|null  $identifier  Identifier as the caller passed it.
+	 * @param  string|null  $ip  IP address as the caller passed it.
+	 * @return array{identifier:string|null,ip:string|null}  Normalized subjects; null for none.
+	 * @throws \InvalidArgumentException  When the IP address is invalid, or neither subject is given.
 	 */
 	private function normalizeSubjects(?string $identifier, ?string $ip): array {
 
@@ -712,11 +588,10 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * Hash a normalized subject value for storage and lookup.
+	 * Hash a normalized subject for storage and lookup.
 	 *
-	 * @param string $value Normalized subject value.
-	 *
-	 * @return string 64-character SHA-256 hex digest.
+	 * @param  string  $value  Normalized subject.
+	 * @return string  SHA-256 hex digest, 64 characters.
 	 */
 	private function hash(string $value): string {
 		return \hash('sha256', $value);
@@ -724,13 +599,12 @@ class BruteForce extends BaseService {
 
 
 	/**
-	 * Check whether a rolling window is still active.
+	 * Tell whether a window is still open.
 	 *
-	 * @param int $windowStart     Window start timestamp.
-	 * @param int $intervalMinutes Window length in minutes.
-	 * @param int $now             Current UNIX timestamp.
-	 *
-	 * @return bool True if the window has not yet expired.
+	 * @param  int  $windowStart  UNIX timestamp of the window start.
+	 * @param  int  $intervalMinutes  Length of the window in minutes.
+	 * @param  int  $now  Current UNIX timestamp.
+	 * @return bool
 	 */
 	private function isWindowActive(int $windowStart, int $intervalMinutes, int $now): bool {
 		return ($windowStart + ($intervalMinutes * 60)) > $now;

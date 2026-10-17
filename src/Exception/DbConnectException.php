@@ -16,24 +16,11 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Connection-level database exception.
+ * DbConnectException: Exception for a database connection that cannot be set up.
  *
- * Thrown when the database service fails before normal query execution can
- * begin, or when connection/session initialization becomes invalid.
- *
- * Behavior:
- * - Used for failures in mysqli_init(), real_connect(), set_charset(), and
- *   session setup such as sql_mode/time_zone initialization.
- * - Signals that the connection itself is unavailable or not fully usable.
- * - Extends DbException so callers may either catch this specifically or
- *   catch DbException for all DB-layer failures.
- *
- * Typical usage:
- *   try {
- *   	$this->app->db->beginTransaction();
- *   } catch (DbConnectException $e) {
- *   	// Database is unreachable or session init failed.
- *   }
+ * Marks a failure before any statement of the caller runs: invalid db cfg, a missing password
+ * secret, or a connect, charset or session setting that the server refuses. A caller that
+ * reports an outage or retries later can tell it from a statement that fails.
  */
 class DbConnectException extends DbException {
 

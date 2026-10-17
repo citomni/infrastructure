@@ -18,13 +18,9 @@ namespace CitOmni\Infrastructure\Exception;
 use RuntimeException;
 
 /**
- * Base exception for all logger failures.
+ * LogException: Base exception for failures of the log service.
  *
- * Behavior:
- * - Marks failures originating from the infrastructure log service
- * - Allows callers to catch log-related failures without catching unrelated runtime failures
- *
- * Notes:
- * - Intentionally minimal
+ * Lets a caller catch every logging failure in one catch without catching unrelated runtime
+ * failures.
  */
 class LogException extends RuntimeException {}

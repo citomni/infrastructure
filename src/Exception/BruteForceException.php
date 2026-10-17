@@ -16,16 +16,11 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * BruteForceException: Base exception for brute force protection failures.
+ * BruteForceException: Base exception for failures of the brute force protection.
  *
- * Allows callers to catch all brute-force-specific exceptions with a single
- * catch block when appropriate. Concrete subclasses provide specificity.
- *
- * Notes:
- * - Input validation errors (empty context, invalid IP, no subjects) use
- *   \InvalidArgumentException directly and do NOT extend this class.
- * - Db failures propagate as DbQueryException / DbConnectException and are
- *   not wrapped here.
+ * Lets a caller catch every failure of the protection's own cfg and storage setup in one
+ * catch. Invalid method input stays \InvalidArgumentException, and a database failure stays
+ * the exception of the Db service; neither is wrapped in this family.
  */
 class BruteForceException extends \RuntimeException {
 }

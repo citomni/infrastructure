@@ -16,38 +16,35 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Base exception for the Curl service.
+ * CurlException: Base exception for failures of the curl service.
  *
- * Behavior:
- * - Carries normalized request context when available.
- * - Provides lightweight accessors for method, URL, and transfer info.
+ * Lets a caller catch every failure of an outbound request in one catch, and carries the
+ * request context needed to report it: the method, the URL and the transfer info, each when
+ * known. An HTTP error status is not a failure; the response reports it.
  *
- * Notes:
- * - This is the common parent for configuration and execution failures.
- * - Query values marked sensitive by Curl are redacted from URL-bearing exception context.
- *
- * @throws void
+ * Rules:
+ * - Never carry a query value that the request marked sensitive.
  */
 class CurlException extends \RuntimeException {
 
-	/** @var string|null */
+	/** Normalized request method, or null when unknown. */
 	protected ?string $requestMethod;
 
-	/** @var string|null */
+	/** Request URL with sensitive query values redacted, or null when unknown. */
 	protected ?string $requestUrl;
 
-	/** @var array<string,mixed> */
+	/** @var array<string,mixed> curl_getinfo() data at the time of the failure, or [] when none was collected. */
 	protected array $transferInfo;
 
 	/**
-	 * Create a new Curl exception.
+	 * Create the exception with the context of the failed request.
 	 *
-	 * @param string $message Exception message.
-	 * @param int $code Exception code.
-	 * @param string|null $requestMethod Normalized request method when available.
-	 * @param string|null $requestUrl Request URL when available; marked sensitive query values may be redacted.
-	 * @param array<string,mixed> $transferInfo Transfer info when available; URL-bearing fields may be redacted.
-	 * @param \Throwable|null $previous Previous exception.
+	 * @param  string  $message  Human-readable message.
+	 * @param  int  $code  Exception code.
+	 * @param  string|null  $requestMethod  Normalized request method, when known.
+	 * @param  string|null  $requestUrl  Request URL, when known, with sensitive query values already redacted.
+	 * @param  array<string,mixed>  $transferInfo  curl_getinfo() data, when collected, with sensitive query values already redacted.
+	 * @param  \Throwable|null  $previous  Lower-layer cause.
 	 */
 	public function __construct(string $message, int $code = 0, ?string $requestMethod = null, ?string $requestUrl = null, array $transferInfo = [], ?\Throwable $previous = null) {
 		parent::__construct($message, $code, $previous);
@@ -58,27 +55,27 @@ class CurlException extends \RuntimeException {
 	}
 
 	/**
-	 * Get the request method, if available.
+	 * Return the normalized request method.
 	 *
-	 * @return string|null Request method or null.
+	 * @return string|null  Null when unknown.
 	 */
 	public function getRequestMethod(): ?string {
 		return $this->requestMethod;
 	}
 
 	/**
-	 * Get the request URL, if available.
+	 * Return the request URL.
 	 *
-	 * @return string|null Request URL or null; marked sensitive query values may be redacted.
+	 * @return string|null  Sensitive query values redacted; null when unknown.
 	 */
 	public function getRequestUrl(): ?string {
 		return $this->requestUrl;
 	}
 
 	/**
-	 * Get transfer info collected at failure time.
+	 * Return the transfer info collected at the time of the failure.
 	 *
-	 * @return array<string,mixed> Transfer info array with marked sensitive query values redacted from URL-bearing fields.
+	 * @return array<string,mixed>  curl_getinfo() data with sensitive query values redacted; [] when none was collected.
 	 */
 	public function getTransferInfo(): array {
 		return $this->transferInfo;

@@ -16,22 +16,10 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Base exception for all database-layer failures in CitOmni.
+ * DbException: Base exception for failures of the db service.
  *
- * Use this as the common catch target when the caller does not need to
- * distinguish between connection failures and query/runtime failures.
- *
- * Behavior:
- * - DbConnectException extends this class for connect/session-init failures.
- * - DbQueryException extends this class for prepare/bind/execute/query failures.
- * - Keeps the DB exception tree explicit and framework-local.
- *
- * Typical usage:
- *   try {
- *   	$this->app->db->execute('DELETE FROM users WHERE id = ?', [$id]);
- *   } catch (DbException $e) {
- *   	// Handle any DB-layer failure.
- *   }
+ * Lets a caller catch every database failure in one catch when it does not need to tell a
+ * connection that cannot be used from a statement that fails.
  */
 class DbException extends \RuntimeException {
 

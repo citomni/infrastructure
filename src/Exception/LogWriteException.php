@@ -16,6 +16,9 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Thrown when a log entry cannot be written successfully.
+ * LogWriteException: Exception for a log entry that is not written completely.
+ *
+ * Marks a write that failed or wrote fewer bytes than the entry has, so the log file may end
+ * with a partial line.
  */
 class LogWriteException extends LogFileException {}

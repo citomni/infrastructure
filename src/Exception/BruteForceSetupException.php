@@ -16,28 +16,28 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * BruteForceSetupException: Thrown when brute force storage is not installed correctly.
+ * BruteForceSetupException: Exception for brute force storage that is not installed.
  *
- * Covers runtime setup failures that prevent brute force protection from using
- * its persistence layer safely, such as a missing bruteforce_counters table.
- *
- * Notes:
- * - This is a setup/deployment error, not invalid user input.
- * - Configuration shape errors use BruteForceConfigException.
- * - Db connection/query failures still propagate as DbConnectException /
- *   DbQueryException from the Db layer.
+ * Marks a deployment error, such as a missing table, so that an installer or a health check
+ * can tell it from a cfg error and from a database failure. Installing the schema belongs to
+ * the app's deployment.
  */
 class BruteForceSetupException extends BruteForceException {
 
+	/** Name of the missing table, or null when the failure is not about one table. */
 	private ?string $missingTable;
+
+	/** Human-readable remediation hint, or null for none. */
 	private ?string $hint;
 
 
 	/**
-	 * @param string $message Human-readable setup error.
-	 * @param ?string $missingTable Missing table name when relevant.
-	 * @param ?string $hint Human-readable remediation hint.
-	 * @param ?\Throwable $previous Previous exception for chaining.
+	 * Create the exception with the missing table and a remediation hint.
+	 *
+	 * @param  string  $message  Human-readable setup error.
+	 * @param  string|null  $missingTable  Name of the missing table, when the failure is about one.
+	 * @param  string|null  $hint  Human-readable remediation hint.
+	 * @param  \Throwable|null  $previous  Lower-layer cause.
 	 */
 	public function __construct(string $message = '', ?string $missingTable = null, ?string $hint = null, ?\Throwable $previous = null) {
 		$this->missingTable = $missingTable;
@@ -47,9 +47,9 @@ class BruteForceSetupException extends BruteForceException {
 
 
 	/**
-	 * Return the missing table name, or null when the setup error is not table-specific.
+	 * Return the name of the missing table.
 	 *
-	 * @return ?string
+	 * @return string|null  Null when the failure is not about one table.
 	 */
 	public function getMissingTable(): ?string {
 		return $this->missingTable;
@@ -57,9 +57,9 @@ class BruteForceSetupException extends BruteForceException {
 
 
 	/**
-	 * Return the remediation hint, or null when no hint was provided.
+	 * Return the remediation hint.
 	 *
-	 * @return ?string
+	 * @return string|null  Null when no hint was given.
 	 */
 	public function getHint(): ?string {
 		return $this->hint;

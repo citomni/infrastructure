@@ -16,15 +16,11 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * BruteForceConfigException: Thrown when brute force configuration is missing or invalid.
+ * BruteForceConfigException: Exception for missing or invalid security.bruteforce cfg.
  *
- * Covers: empty bruteforce config node, missing context key, invalid threshold
- * values (non-positive limits, zero interval, etc.).
- *
- * Notes:
- * - This is a configuration error, not a runtime input error.
- *   Fix by correcting the security.bruteforce node in the app cfg; the package baseline
- *   is Registry::CFG_COMMON.
+ * Marks a configuration error in the app, such as a context that is not configured or a
+ * limit below 1, not invalid input: Let it reach the global error handler. Fixing the value
+ * belongs to the app's cfg files.
  */
 class BruteForceConfigException extends BruteForceException {
 }

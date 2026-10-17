@@ -16,11 +16,12 @@ declare(strict_types=1);
 namespace CitOmni\Infrastructure\Exception;
 
 /**
- * Thrown when the Txt service encounters invalid or missing runtime configuration.
+ * TxtConfigException: Exception for missing or invalid cfg of the txt service.
  *
- * This exception is reserved for true service misconfiguration, such as a missing
- * or malformed locale.language value. Operational content issues in language
- * files are intentionally not represented by this exception, because those cases
- * must preserve legacy fallback behavior.
+ * Marks a configuration error in the app, such as a missing or malformed locale.language,
+ * not a content problem in a language file: Let it reach the global error handler. Fixing
+ * the value belongs to the app's cfg files.
+ *
+ * @see \CitOmni\Infrastructure\Service\Txt::get()  How content problems are answered instead.
  */
 class TxtConfigException extends \RuntimeException {}

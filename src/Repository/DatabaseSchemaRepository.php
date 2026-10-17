@@ -18,32 +18,27 @@ namespace CitOmni\Infrastructure\Repository;
 use CitOmni\Kernel\Repository\BaseRepository;
 
 /**
- * Repository for cheap database schema checks.
+ * DatabaseSchemaRepository: Repository for checks against the schema of the current database.
  *
- * Behavior:
- * - Checks database metadata using the active database connection.
- * - Keeps schema inspection SQL out of Operations, Controllers, and Services.
+ * Answers cheap questions about the schema, such as whether a table exists, so that a service
+ * can report a missing installation clearly. What a missing table means belongs to the
+ * caller, and creating or migrating tables belongs to the app's deployment.
  *
- * Notes:
- * - This is not a migration system. That beast lives elsewhere, preferably
- *   behind a fence with a warning sign.
- * - Methods are intentionally small and deterministic.
- *
- * Typical usage:
- *   $schemaRepo = new DatabaseSchemaRepository($this->app);
- *
- *   if (!$schemaRepo->tableExists('bruteforce_counters')) {
- *       // The caller decides what that means.
- *   }
+ * Rules:
+ * - Read schema metadata only; never change the schema.
  */
 class DatabaseSchemaRepository extends BaseRepository {
 
 	/**
-	 * Check whether a table exists in the current database.
+	 * Tell whether a table exists in the current database.
 	 *
-	 * @param string $tableName Table name to check.
-	 * @return bool True when the table exists.
-	 * @throws \InvalidArgumentException When the table name contains unsupported characters.
+	 * Notes:
+	 * - Whether the name is compared case-sensitively depends on the server's
+	 *   lower_case_table_names and file system.
+	 *
+	 * @param  string  $tableName  Letters, digits and underscores only.
+	 * @return bool
+	 * @throws \InvalidArgumentException  When the name holds another character or is empty.
 	 */
 	public function tableExists(string $tableName): bool {
 		if (!\preg_match('/^[A-Za-z0-9_]+$/', $tableName)) {

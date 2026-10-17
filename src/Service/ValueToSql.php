@@ -21,61 +21,37 @@ use CitOmni\Infrastructure\Exception\ValueToSqlException;
 use CitOmni\Kernel\Service\BaseService;
 
 /**
- * ValueToSql: Strict UI/form -> SQL value normalizer for MySQL/MariaDB parameter binding.
+ * ValueToSql: Service that converts form input into values for SQL parameter binding.
  *
- * Converts common UI input formats into SQL-friendly scalar strings/values intended
- * for prepared statement binding (Not a query builder. Not a SQL dialect abstraction layer.)
+ * Turns what a form posts into the exact value a MySQL or MariaDB column takes, and rejects
+ * what it would have to guess at: Numbers follow the separators of cfg locale.format, dates
+ * and times the formats that HTML inputs post. Binding the values belongs to the Repositories
+ * and the db service; which fields are required and what is valid in the domain belongs to
+ * the caller.
  *
- * Core rules:
- * - Fail fast on invalid inputs (no guessing, no silent coercion).
- * - Deterministic and cfg-strict for number formats:
- *   - decimal separator: cfg locale.format.decimal_separator (required, exactly 1 char)
- *   - thousand separator: cfg locale.format.thousand_separator (optional: '' or exactly 1 char)
- *   - If thousand separator is enabled, it must differ from the decimal separator.
- * - Whitespace policy:
- *   - Leading/trailing whitespace is trimmed.
- *   - Internal whitespace is NOT removed unless it is configured as thousand separator.
- *
- * Required semantics (default required=false across methods):
- * - Empty values return null when required=false.
- * - Empty values throw when required=true.
- *
- * Numeric parsing (cfg-strict, no heuristics):
- * - integer():
- *   - Accepts: optional leading '+'/'-', digits, and the configured thousand separator (if enabled),
- *     with strict 3-digit grouping (first group 1-3 digits, subsequent groups exactly 3 digits).
- *   - Rejects: any occurrence of the configured decimal separator, any other characters,
- *     any wrong/empty grouping, or separators when thousand separator is disabled ('').
- *   - Parses with overflow-safe digit-by-digit checks.
- * - decimal():
- *   - Accepts: optional leading '+'/'-', integer part with optional configured thousand separators
- *     (same strict 3-digit grouping), and an optional fractional part separated by the configured
- *     decimal separator (must appear at most once).
- *   - If the decimal separator is present but no fractional digits are provided (e.g. "123,"), it is treated as an integer value.
- *   - Rejects: thousand separators in the fractional part, any non-digit characters beyond the
- *     allowed separators, wrong/empty grouping, or alternative separator characters.
- *   - Normalizes output to SQL dot-decimal form ('.') and enforces scale without rounding.
- *
- * Date/time parsing:
- * - date(): accepts HTML type="date" format "YYYY-MM-DD" and also "DD-MM-YYYY"/"DD/MM/YYYY" (strict).
- * - time(): accepts "HH:MM" and "HH:MM:SS" (strict).
- * - dateTime(): accepts HTML datetime-local "YYYY-MM-DDTHH:MM[:SS]" and "YYYY-MM-DD HH:MM[:SS]" (strict).
- *   All are treated as local wall-clock values (no timezone conversion).
- *
- * Typical usage:
- *   $price = $this->app->valueToSql->decimal($post['price'], required: true); // "1234.50"
- *   $year  = $this->app->valueToSql->integer($post['year'], required: true, min: 1900, max: 2100); // 2026
- *   $date  = $this->app->valueToSql->date($post['moved_in']); // "2026-02-26" or null
- *
- * @throws ValueToSqlException On invalid user input values.
- * @throws ValueConfigurationException On invalid locale configuration.
- * @throws ValueDefinitionException On invalid normalization rule definitions or caller arguments.
+ * Rules:
+ * - Never guess, round a string or cast silently: Input that does not match exactly is
+ *   rejected with ValueToSqlException, whose message key names the reason.
+ * - Treat an empty value as missing: null, or ValueToSqlException when required is true.
+ * - Report an invalid rule from the calling code, such as reversed bounds, as
+ *   ValueDefinitionException, never as ValueToSqlException.
+ * - Treat dates and times as local wall-clock values, without time zone conversion.
  */
 class ValueToSql extends BaseService {
 
+	/** Decimal separator of cfg locale.format.decimal_separator. */
 	private string $decimalSeparator = ',';
+
+	/** Thousand separator of cfg locale.format.thousand_separator, or '' for none. */
 	private string $thousandSeparator = '.';
 
+	/**
+	 * Read and check the separators of cfg locale.format once.
+	 *
+	 * @return void
+	 * @throws \CitOmni\Infrastructure\Exception\ValueConfigurationException  When decimal_separator is not one byte, thousand_separator is neither '' nor one byte, or both are the same.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
+	 */
 	protected function init(): void {
 		// Package-owned cfg: Assumes the Registry baseline for locale.format, so no isset() guard.
 		$format = $this->app->cfg->locale->format;
@@ -104,43 +80,31 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI integer to a PHP int suitable for SQL parameter binding.
-	 *
-	 * This method is cfg-strict:
-	 * - Uses cfg-defined thousand separator (may be '' which disables thousand separators).
-	 * - Rejects any occurrence of the cfg-defined decimal separator (No "123,00" tolerance).
-	 * - No guessing, no tolerance for alternative separators.
+	 * Convert form input to an integer.
 	 *
 	 * Behavior:
-	 * - Empty input:
-	 *   - required=false -> null
-	 *   - required=true  -> throws
-	 * - Accepted inputs:
-	 *   - "1.234" only when cfg thousand_separator is "."
-	 *   - "1 234" only when cfg thousand_separator is " "
-	 *   - No thousand separators when cfg thousand_separator is ""
-	 *   - Optional leading '+'/'-' (a leading '+' is accepted but has no effect on output - the result is an int)
-	 * - Rejected inputs:
-	 *   - Any occurrence of cfg decimal_separator (no "123,00" tolerance)
-	 *   - Any non-digit chars (after removing valid thousand separators)
-	 *   - Mixed or incorrectly grouped thousand separators
-	 *
-	 * Notes:
-	 * - Parsing is performed digit-by-digit with overflow checks.
-	 * - This method does not accept "integer disguised as decimal" (e.g. "123,00").
+	 * - Accepts an int, or a string of digits with an optional sign and the thousand separator
+	 *   of cfg in groups of three: 1.234 when the thousand separator is '.', 1 234 when it is
+	 *   ' ', and no separator when it is ''.
+	 * - Rejects the decimal separator anywhere, so 123,00 is no integer; any other character
+	 *   or grouping; and a float, bool, array or object.
+	 * - Rejects a value beyond the int range of the platform as out of range instead of
+	 *   overflowing; PHP_INT_MIN itself is accepted.
+	 * - Rejects a negative value when $allowNegative is false, and a value outside $min to $max.
+	 * - When the thousand separator is a space, a non-breaking or narrow non-breaking space
+	 *   counts as a space, and a run of spaces as one.
 	 *
 	 * Typical usage:
-	 *   $year  = $this->app->valueToSql->integer($post['year'], required: true, min: 1900, max: 2100);
-	 *   $count = $this->app->valueToSql->integer($post['count']);
+	 *   $year = $this->app->valueToSql->integer($post['year'], required: true, min: 1900, max: 2100);
 	 *
-	 * @param mixed $value UI input value (Typically string; may be null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @param int $min Minimum allowed value (Default PHP_INT_MIN).
-	 * @param int $max Maximum allowed value (Default PHP_INT_MAX).
-	 * @param bool $allowNegative Whether negative values are allowed (Default true).
-	 * @return int|null Parsed integer or null.
-	 *
-	 * @throws ValueToSqlException On invalid format or out-of-range value.
+	 * @param  mixed  $value  Form input: string, int or null; a string is trimmed.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @param  int  $min  Smallest accepted value.
+	 * @param  int  $max  Largest accepted value.
+	 * @param  bool  $allowNegative  Accept values below 0.
+	 * @return int|null  Null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is rejected; an out of range failure carries min and max.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueDefinitionException  When $min is greater than $max.
 	 */
 	public function integer(mixed $value, bool $required = false, int $min = \PHP_INT_MIN, int $max = \PHP_INT_MAX, bool $allowNegative = true): ?int {
 		
@@ -273,62 +237,33 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI decimal string to a SQL dot-decimal string (DECIMAL-safe).
-	 *
-	 * Locale behavior is 100% cfg-strict:
-	 * - Decimal separator: $this->decimalSeparator (cfg locale.format.decimal_separator, exactly 1 char).
-	 * - Thousand separator: $this->thousandSeparator (cfg locale.format.thousand_separator, '' or exactly 1 char).
-	 * - No heuristics and no alternative separators are accepted.
+	 * Convert form input to a dot-decimal string with exactly $scale decimals, for a DECIMAL column.
 	 *
 	 * Behavior:
-	 * - Empty input:
-	 *   1) required=false -> null
-	 *   2) required=true  -> throws
-	 * - Leading/trailing whitespace is trimmed.
-	 * - Optional leading '+' or '-' is allowed (negative depends on $allowNegative).
-	 *   (a leading '+' is accepted but not preserved - so output never includes '+')
-	 * - Thousand separator (if enabled) is only allowed in the integer part and must use strict 3-digit grouping:
-	 *   1) First group: 1-3 digits
-	 *   2) Subsequent groups: exactly 3 digits
-	 * - Decimal separator (cfg) may appear at most once.
-	 * - If the decimal separator is present but no fractional digits are provided (e.g. "123,"), the value is treated as an integer ("123") and then scale-padding is applied.
-	 * - Fractional part must be digits only and must not contain thousand separators.
-	 *
-	 * Output:
-	 * - Always normalized to SQL dot-decimal form using '.' as decimal separator.
-	 * - Enforces $scale without rounding:
-	 *   - If fewer than $scale fraction digits are provided, pads with trailing zeros.
-	 *   - If more than $scale fraction digits are provided, throws.
-	 * - scale=0 returns an integer-like string (no dot).
-	 *
-	 * Examples (cfg-dependent):
-	 * - If cfg decimal_separator=',' and thousand_separator='.':
-	 *   - "1.234,5"  -> "1234.50" (scale=2)
-	 *   - ",5"       -> "0.50"    (scale=2)
-	 *   - "12,00"    -> throws    (scale=0; zeros count as fraction digits)
-	 *   - "1234.5"   -> throws ('.' is not the cfg decimal separator)
-	 * - If cfg decimal_separator='.' and thousand_separator=',':
-	 *   - "1,234.5"  -> "1234.50" (scale=2)
-	 *   - "1.234,5"  -> throws (',' is not the cfg decimal separator)
-	 *
-	 * Notes:
-	 * - This method is intended for SQL parameter binding to DECIMAL/NUMERIC columns.
-	 * - For string inputs, this method does not apply any rounding policy (fail fast instead).
-	 * - For numeric inputs (int/float), values are rounded to $scale using HALF_UP to avoid float artifacts.
-	 * - Remember that float is approximate!
+	 * - Accepts a string with an optional sign, an integer part with the thousand separator of
+	 *   cfg in groups of three, and decimals after the decimal separator of cfg, which occurs
+	 *   at most once. With ',' as decimal and '.' as thousand separator, 1.234,5 gives 1234.50
+	 *   and ,5 gives 0.50 at scale 2, while 1234.5 is rejected.
+	 * - A trailing decimal separator without decimals counts as an integer.
+	 * - Pads the decimals with zeros to $scale and rejects more decimals than $scale, zeros
+	 *   included: 12,00 is rejected at scale 0. A string is never rounded.
+	 * - An int is padded to $scale. A float is rounded half up to $scale, and NAN and INF are
+	 *   rejected; a float is approximate, so prefer strings.
+	 * - Returns no plus sign and no negative zero.
+	 * - Rejects a bool, array or object, a minus sign when $allowNegative is false, and any
+	 *   other separator or character. When the thousand separator is a space, a non-breaking or
+	 *   narrow non-breaking space counts as a space, and a run of spaces as one.
 	 *
 	 * Typical usage:
-	 *   $price = $this->app->valueToSql->decimal($post['price'], required: true); // e.g. "1234.50"
-	 *   $vat   = $this->app->valueToSql->decimal($post['vat'], scale: 0);        // e.g. "25"
+	 *   $price = $this->app->valueToSql->decimal($post['price'], required: true);
 	 *
-	 * @param mixed $value UI input value (typically string; may be null).
-	 * @param bool $required Whether empty input is allowed (default false).
-	 * @param int $scale Fractional digits to enforce (default 2, range 0..18).
-	 * @param bool $allowNegative Whether negative values are allowed (default true).
-	 * @return string|null Normalized SQL decimal string or null if empty and not required.
-	 *
-	 * @throws ValueToSqlException On invalid format, invalid scale, disallowed negative values,
-	 *                             or when required=true and input is empty.
+	 * @param  mixed  $value  Form input: string, int, float or null; a string is trimmed.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @param  int  $scale  Decimals of the column, 0-18.
+	 * @param  bool  $allowNegative  Accept values below 0.
+	 * @return string|null  Such as 1234.50, or 25 at scale 0; null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is rejected; a too many decimals failure carries scale.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueDefinitionException  When $scale is outside 0-18.
 	 */
 	public function decimal(mixed $value, bool $required = false, int $scale = 2, bool $allowNegative = true): ?string {
 		
@@ -449,37 +384,20 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI boolean value to an integer (0/1) for SQL binding.
-	 *
-	 * Intended for TINYINT(1), BIT(1) or similar boolean-like columns.
-	 * Always returns 1 or 0 (never true/false).
+	 * Convert form input to 1 or 0 for a boolean column, such as TINYINT(1).
 	 *
 	 * Behavior:
-	 * - Empty input:
-	 *   1) required=false -> null
-	 *   2) required=true  -> throws
-	 * - Accepts (case-insensitive for strings):
-	 *   - true/false (bool)
-	 *   - 1/0 (int)
-	 *   - "1"/"0"
-	 *   - "true"/"false"
-	 *   - "yes"/"no"
-	 *   - "on"/"off"
-	 * - Any other value -> throws.
-	 *
-	 * Notes:
-	 * - String comparison is strict after trimming.
-	 * - No implicit casting beyond explicitly supported values.
-	 * - Designed for deterministic behavior (no FILTER_VALIDATE_BOOLEAN heuristics).
+	 * - Accepts true and false, the ints 1 and 0, and the strings 1, true, yes and on, or 0,
+	 *   false, no and off, in any letter case.
+	 * - Rejects every other value, and a float, array or object.
 	 *
 	 * Typical usage:
 	 *   $active = $this->app->valueToSql->boolean($post['active'], required: true);
 	 *
-	 * @param mixed $value UI input value.
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return int|null 1 or 0, or null if empty and not required.
-	 *
-	 * @throws ValueToSqlException On invalid value.
+	 * @param  mixed  $value  Form input: string, bool, int or null; a string is trimmed.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @return int|null  1 or 0; null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is rejected.
 	 */
 	public function boolean(mixed $value, bool $required = false): ?int {
 		
@@ -526,33 +444,20 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI date to "YYYY-MM-DD".
-	 *
-	 * Accepts:
-	 * - "YYYY-MM-DD" (HTML input type="date")
-	 * - "DD-MM-YYYY"
-	 * - "DD/MM/YYYY"
+	 * Convert form input to a date in the form YYYY-MM-DD, for a DATE column.
 	 *
 	 * Behavior:
-	 * - Empty input:
-	 *   - required=false -> null
-	 *   - required=true  -> throws
-	 * - Validates:
-	 *   - Date must be a real calendar date (checkdate).
-	 * - Output is always normalized to "YYYY-MM-DD".
-	 *
-	 * Notes:
-	 * - This method does not accept mixed separators (e.g. "12-03/2026").
-	 * - Intended for SQL DATE binding.
+	 * - Accepts YYYY-MM-DD, as input type="date" posts it, and DD-MM-YYYY or DD/MM/YYYY with
+	 *   the same separator twice.
+	 * - Rejects a date that does not exist, such as 2026-02-30.
 	 *
 	 * Typical usage:
 	 *   $birthDate = $this->app->valueToSql->date($post['birth_date'], required: true);
 	 *
-	 * @param mixed $value UI input.
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return string|null SQL date string ("YYYY-MM-DD") or null.
-	 *
-	 * @throws ValueToSqlException On invalid date or when required and empty.
+	 * @param  mixed  $value  Form input: string or null; trimmed.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @return string|null  Null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is not a string, is rejected, or is empty while required.
 	 */
 	public function date(mixed $value, bool $required = false): ?string {
 		
@@ -592,34 +497,20 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI time value to "HH:MM:SS".
-	 *
-	 * Accepts:
-	 * - "HH:MM" (HTML input type="time", default step)
-	 * - "HH:MM:SS" (when step allows seconds)
+	 * Convert form input to a time of day in the form HH:MM:SS, for a TIME column.
 	 *
 	 * Behavior:
-	 * - Empty input:
-	 *   - required=false -> null
-	 *   - required=true  -> throws
-	 * - Validates:
-	 *   - 00 <= HH <= 23
-	 *   - 00 <= MM <= 59
-	 *   - 00 <= SS <= 59
-	 * - Output always includes seconds (pads with ":00" when missing).
-	 *
-	 * Notes:
-	 * - This method treats input as a local wall-clock time (no timezone).
-	 * - Intended for SQL TIME binding.
+	 * - Accepts HH:MM, as input type="time" posts it by default, and HH:MM:SS; missing seconds
+	 *   become 00.
+	 * - Rejects an hour above 23 and a minute or second above 59.
 	 *
 	 * Typical usage:
 	 *   $startTime = $this->app->valueToSql->time($post['start_time'], required: true);
 	 *
-	 * @param mixed $value UI input.
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return string|null SQL time string ("HH:MM:SS") or null.
-	 *
-	 * @throws ValueToSqlException On invalid time or when required and empty.
+	 * @param  mixed  $value  Form input: string or null; trimmed.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @return string|null  Null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is not a string, is rejected, or is empty while required.
 	 */
 	public function time(mixed $value, bool $required = false): ?string {
 		
@@ -652,38 +543,21 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI datetime to "YYYY-MM-DD HH:MM:SS".
-	 *
-	 * Accepts:
-	 * - "YYYY-MM-DDTHH:MM" (HTML datetime-local)
-	 * - "YYYY-MM-DDTHH:MM:SS"
-	 * - "YYYY-MM-DD HH:MM"
-	 * - "YYYY-MM-DD HH:MM:SS"
+	 * Convert form input to a date and time in the form YYYY-MM-DD HH:MM:SS, for a DATETIME column.
 	 *
 	 * Behavior:
-	 * - Empty input:
-	 *   - required=false -> null
-	 *   - required=true  -> throws
-	 * - Normalizes:
-	 *   - Replaces "T" with a single space (HTML datetime-local).
-	 *   - Collapses any whitespace between date/time into a single space.
-	 * - Validates:
-	 *   - Date must be a real calendar date (checkdate).
-	 *   - Time must be within 00:00:00..23:59:59.
-	 * - Output always includes seconds (pads with ":00" when missing).
-	 *
-	 * Notes:
-	 * - This method treats input as a local wall-clock value (no timezone).
-	 * - Intended for SQL DATETIME binding (not TIMESTAMP/UTC conversion).
+	 * - Accepts YYYY-MM-DDTHH:MM, as input type="datetime-local" posts it by default, with or
+	 *   without seconds, and with a space instead of the T; missing seconds become 00. A run of
+	 *   whitespace counts as one space.
+	 * - Rejects a date that does not exist, and a time outside 00:00:00 to 23:59:59.
 	 *
 	 * Typical usage:
 	 *   $startsAt = $this->app->valueToSql->dateTime($post['starts_at'], required: true);
 	 *
-	 * @param mixed $value UI input.
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return string|null SQL datetime string ("YYYY-MM-DD HH:MM:SS") or null.
-	 *
-	 * @throws ValueToSqlException On invalid datetime or when required and empty.
+	 * @param  mixed  $value  Form input: string or null; trimmed.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @return string|null  Null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is not a string, is rejected, or is empty while required.
 	 */
 	public function dateTime(mixed $value, bool $required = false): ?string {
 		
@@ -727,36 +601,27 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize UI text for SQL binding (string input only).
+	 * Check form text for a text column.
 	 *
 	 * Behavior:
-	 * - Type rules:
-	 *   - Accepts: string
-	 *   - Accepts: null only when required=false
-	 *   - Rejects: int/float/bool/array/object (no implicit casting)
-	 * - Empty input:
-	 *   1) required=false -> null (null or "" after optional trim)
-	 *   2) required=true  -> throws
-	 * - Optional trim (default true).
-	 * - Optional max length (0 disables length check).
+	 * - Accepts a string only. An int, float, bool, array or object is rejected rather than
+	 *   cast, so true never reaches a text column as '1'.
+	 * - Returns null for '', after trimming when $trim is true.
 	 *
 	 * Notes:
-	 * - This method is intentionally strict to prevent accidental "scalar-to-string" casts
-	 *   (e.g. true -> "1") leaking into persisted text columns.
-	 * - If you need numeric formatting, normalize with integer()/decimal() and then decide
-	 *   explicitly whether you want to store that result as text.
+	 * - $maxLen counts bytes. A VARCHAR(n) counts characters, so a limit of n bytes is stricter
+	 *   for multibyte text.
 	 *
 	 * Typical usage:
 	 *   $title = $this->app->valueToSql->text($post['title'], required: true, maxLen: 200);
-	 *   $note  = $this->app->valueToSql->text($post['note']);
 	 *
-	 * @param mixed $value UI input (string or null).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @param int $maxLen Maximum allowed length in bytes (0 disables).
-	 * @param bool $trim Whether to trim whitespace (Default true).
-	 * @return string|null Normalized string or null.
-	 *
-	 * @throws ValueToSqlException On invalid type, when required and empty, or on max length violation.
+	 * @param  mixed  $value  Form input: string or null.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @param  int  $maxLen  Maximum length in bytes, >= 0; 0 for no limit.
+	 * @param  bool  $trim  Trim the text first.
+	 * @return string|null  Null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is not a string, is empty while required, or is longer than $maxLen; a too long failure carries max.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueDefinitionException  When $maxLen is below 0 and the value is not empty.
 	 */
 	public function text(mixed $value, bool $required = false, int $maxLen = 0, bool $trim = true): ?string {
 		if ($value === null) {
@@ -795,36 +660,22 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Validate a UI value against an allowed set (ENUM-like) and return a string.
+	 * Check form input against a list of allowed strings, such as the values of an ENUM column.
 	 *
 	 * Behavior:
-	 * - Type rules:
-	 *   - Accepts: string
-	 *   - Accepts: null only when required=false
-	 *   - Rejects: int/float/bool/array/object (no implicit casting)
-	 * - Empty input:
-	 *   1) required=false -> null (null or "" after trim)
-	 *   2) required=true  -> throws
-	 * - Allowed contract:
-	 *   - $allowed must be a list of strings (strict, no implicit casting).
-	 *   - Matching is performed as an exact string match after trimming UI input.
-	 * - Output:
-	 *   - Returns the matched string (same as UI value) when allowed.
-	 *
-	 * Notes:
-	 * - This method is intentionally strict and deterministic.
-	 * - If you need "case-insensitive" or "int enum" behavior, add a separate method
-	 *   (do not smuggle heuristics into this one).
+	 * - Returns the trimmed input when it equals an allowed value exactly, letter case
+	 *   included.
+	 * - Accepts a string only; any other type is rejected rather than cast.
 	 *
 	 * Typical usage:
-	 *   $status = $this->app->valueToSql->enum($post['status'], ['draft','published'], required: true);
+	 *   $status = $this->app->valueToSql->enum($post['status'], ['draft', 'published'], required: true);
 	 *
-	 * @param mixed $value UI input (string or null).
-	 * @param string[] $allowed Allowed values (strict match).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return string|null Allowed string or null.
-	 *
-	 * @throws ValueToSqlException On invalid type, invalid value, or invalid $allowed contract.
+	 * @param  mixed  $value  Form input: string or null; trimmed.
+	 * @param  list<string>  $allowed  Allowed values; not empty.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @return string|null  Null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is not a string, is empty while required, or is not allowed.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueDefinitionException  When $allowed is empty or holds a value that is not a string, and the value is not empty.
 	 */
 	public function enum(mixed $value, array $allowed, bool $required = false): ?string {
 
@@ -867,17 +718,20 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI value to a JSON string for SQL binding.
+	 * Convert form input to a JSON string, for a JSON column.
 	 *
-	 * Accepted inputs:
-	 * - A JSON string (validated and returned as-is after trim)
-	 * - A PHP array/object (encoded to JSON)
+	 * Behavior:
+	 * - A string must be well-formed JSON and is returned trimmed, otherwise unchanged.
+	 * - An array or object is encoded, with Unicode and slashes unescaped.
+	 * - Rejects every other type.
 	 *
-	 * @param mixed $value UI input (array/object/string).
-	 * @param bool $required Whether empty input is allowed (Default false).
-	 * @return string|null JSON string or null.
+	 * Typical usage:
+	 *   $settings = $this->app->valueToSql->json($post['settings']);
 	 *
-	 * @throws ValueToSqlException On invalid JSON or unsupported input.
+	 * @param  mixed  $value  JSON string, array, object or null.
+	 * @param  bool  $required  Reject an empty value instead of returning null.
+	 * @return string|null  Null for an empty value.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When a string is not valid JSON, an array or object cannot be encoded, the type is not accepted, or the value is empty while required.
 	 */
 	public function json(mixed $value, bool $required = false): ?string {
 		if ($value === null) {
@@ -920,29 +774,12 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Require string or null and return a trimmed string or null.
+	 * Return a string trimmed, or null for null and for a string that is empty after trimming.
 	 *
-	 * This helper enforces a strict type contract for UI inputs where only
-	 * textual values are meaningful (e.g. date, time, datetime).
-	 *
-	 * Behavior:
-	 * - null -> null
-	 * - string:
-	 *   1) trim()
-	 *   2) '' after trim -> null
-	 *   3) otherwise -> trimmed string
-	 * - non-string (int, float, bool, array, object) -> throws
-	 *
-	 * Guarantees:
-	 * - No implicit scalar-to-string casting.
-	 * - No silent coercion of unexpected types.
-	 * - Whitespace-only input is treated as "missing" (null).
-	 *
-	 * @param mixed $value UI input value.
-	 * @param string $invalidKey Txt/message key used when the value type is invalid.
-	 * @return string|null Trimmed string or null if empty.
-	 *
-	 * @throws ValueToSqlException When $value is not a string and not null.
+	 * @param  mixed  $value  Form input.
+	 * @param  string  $invalidKey  Message key when the value is neither null nor a string.
+	 * @return string|null
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the value is neither null nor a string; it is never cast.
 	 */
 	private function requireStringOrNull(mixed $value, string $invalidKey): ?string {
 		if ($value === null) {
@@ -957,35 +794,19 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Normalize a UI decimal string to a SQL dot-decimal numeric string.
+	 * Convert a decimal string with the separators of cfg to a dot-decimal string.
 	 *
-	 * Rules:
-	 * - Policy is derived from cfg:
-	 *   - decimal separator: $this->decimalSeparator (single char, required)
-	 *   - thousand separator: $this->thousandSeparator (single char or '', optional)
-	 * - No guessing:
-	 *   - Only the configured separators are accepted.
-	 *   - Exception: If the configured thousand separator is a regular space, NBSP and narrow NBSP
-	 *     are normalized to a regular space before validation to tolerate common copy/paste input.
-	 * - Whitespace:
-	 *   - Leading/trailing whitespace is trimmed.
-	 *   - Internal whitespace is not removed unless it is the configured thousand separator.
-	 * - Decimal separator:
-	 *   - May appear at most once.
-	 * - Thousand separator:
-	 *   - If configured as '' -> not allowed at all.
-	 *   - Otherwise -> allowed only in the integer part and only with strict 3-digit grouping
-	 *     (first group 1-3 digits, subsequent groups exactly 3 digits).
+	 * Behavior:
+	 * - Accepts an optional sign, an integer part with the thousand separator in groups of
+	 *   three, and decimals after the decimal separator, which occurs at most once; the
+	 *   decimals hold digits only. An empty integer part becomes 0.
+	 * - Returns digits with an optional minus and an optional dot with the decimals as typed;
+	 *   never a plus sign.
 	 *
-	 * Output:
-	 * - Digits only, optional leading '-' sign, optional fractional part separated by '.'.
-	 * - Examples: "1234", "1234.56", "-1234.56"
-	 *
-	 * @param string $s Non-empty trimmed string (UI input).
-	 * @param bool $allowNegative Whether negative values are allowed.
-	 * @return string Normalized SQL decimal string using '.' as decimal separator.
-	 *
-	 * @throws ValueToSqlException On invalid format or disallowed value.
+	 * @param  string  $s  Non-empty, trimmed input.
+	 * @param  bool  $allowNegative  Accept a minus sign.
+	 * @return string  Such as 1234, 1234.56 or -0.5.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the format is invalid, or a minus sign is not allowed.
 	 */
 	private function normalizeDecimalString(string $s, bool $allowNegative): string {
 		$decSep = $this->decimalSeparator;
@@ -1051,18 +872,20 @@ class ValueToSql extends BaseService {
 
 
 	/**
-	 * Strip thousand separators strictly and return digits-only.
+	 * Remove the thousand separators from an integer part, rejecting a malformed one.
 	 *
-	 * Rules:
-	 * - If $thoSep === '': input must be digits only (no separators).
-	 * - If $thoSep !== '': allow proper 3-digit grouping in the integer part:
-	 *   - First group: 1-3 digits
-	 *   - Subsequent groups: exactly 3 digits
+	 * Behavior:
+	 * - Without a thousand separator, accepts digits only.
+	 * - With one, accepts digits only, or a first group of one to three digits followed by
+	 *   groups of exactly three.
+	 * - When the separator is a space, a non-breaking or narrow non-breaking space counts as a
+	 *   space, and a run of spaces as one.
 	 *
-	 * @param string $raw Integer part as typed (may be empty).
-	 * @param string $thoSep Thousand separator ('' or single char).
-	 * @param string $errKey Txt key used for exceptions.
-	 * @return string Digits-only integer part.
+	 * @param  string  $raw  Integer part as typed; may be ''.
+	 * @param  string  $thoSep  Thousand separator, or '' for none.
+	 * @param  string  $errKey  Message key of the exception.
+	 * @return string  Digits only; '' for ''.
+	 * @throws \CitOmni\Infrastructure\Exception\ValueToSqlException  When the part is malformed.
 	 */
 	private function stripAndValidateThousands(string $raw, string $thoSep, string $errKey): string {
 		if ($raw === '') {

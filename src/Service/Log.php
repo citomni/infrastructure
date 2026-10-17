@@ -24,70 +24,61 @@ use CitOmni\Kernel\Service\BaseService;
 
 
 /**
- * Writes newline-delimited JSON log entries with deterministic rotation.
+ * Log: Service that appends JSON lines to log files and rotates the files by size.
  *
- * This service is a native CitOmni replacement for the former LiteLog-backed
- * wrapper. The public API is intentionally preserved so downstream code can
- * continue using $this->app->log unchanged.
+ * Gives every caller one way to write structured log lines that several processes can append
+ * to at once: one JSON object per line, written under a lock and rotated when a file reaches
+ * its size limit. What is worth logging belongs to the callers; reading, shipping and
+ * archiving the files belongs to the server.
  *
- * Behavior:
- * - Resolves and validates supported log configuration values during init
- * - Writes exactly one JSON object per line using "\n" as the line separator
- *   1) timestamp
- *   2) category
- *   3) message
- *   4) context, only when non-empty
- * - Uses a sidecar lock file per active log file to serialize append, rotation, and pruning
- * - Rotates before append when the active file is already at or above the limit
- * - Rotates after append when the write pushes the file over the limit
- * - Pruning failures are non-fatal, but lock, open, write, and rotation failures are fatal
- *
- * Notes:
- * - cfg log is read directly; a missing key throws \OutOfBoundsException
- * - This service intentionally avoids direct dependency on the concrete Cfg class
- * - Supported child config values are validated explicitly during init
- * - Grossly invalid log node shape is allowed to fail fast during child access
- * - File names are flat only; subdirectories are forbidden in $file
- * - Logger-managed files are normalized to the ".jsonl" extension
- * - Hidden-file style and dot-only names are rejected
- * - Encoding fallback is intentionally bounded and only used when normal JSON encoding fails
- * - Fallback normalization avoids deep or cyclic object traversal and may replace complex values with deterministic placeholders
- *
- * Typical usage:
- *   $this->app->log->write(null, 'auth', 'User logged in', ['userId' => 42]);
+ * Rules:
+ * - Write exactly one JSON object per line, terminated by "\n", also when the payload cannot
+ *   be encoded as given.
+ * - Hold the lock of a log file across every append, rotation and pruning of that file.
+ * - Keep pruning best-effort: A failed deletion never fails a write.
+ * - Keep every log file directly in the log directory, with the extension .jsonl.
  */
 class Log extends BaseService {
 
+	/** Smallest accepted rotation size in bytes. */
 	private const MIN_MAX_FILE_SIZE = 1024;
+
+	/** Deepest array level that the fallback encoding keeps; a deeper value becomes a placeholder. */
 	private const MAX_NORMALIZE_DEPTH = 8;
+
+	/** Terminator of every log line. */
 	private const LINE_FEED = "\n";
+
+	/** json_encode() flags: Unicode and slashes unescaped, invalid UTF-8 replaced by U+FFFD. */
 	private const JSON_FLAGS = \JSON_UNESCAPED_UNICODE | \JSON_UNESCAPED_SLASHES | \JSON_INVALID_UTF8_SUBSTITUTE;
+
+	/** ASCII control characters except tab, line feed and carriage return. */
 	private const CONTROL_CHARS_PATTERN = '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/';
 
+	/** Log directory with a trailing separator. */
 	private string $dir = '';
+
+	/** File for write() without a file name, with the extension .jsonl. */
 	private string $defaultFile;
+
+	/** Size in bytes at which a log file is rotated. */
 	private int $maxFileSize;
+
+	/** Rotated files kept per log file, or null to keep all. */
 	private ?int $maxRotatedFiles = null;
 
 
 	/**
-	 * Initializes validated scalar configuration for the logger.
+	 * Read and check the log cfg once.
 	 *
 	 * Behavior:
-	 * - Reads path, default_file, max_bytes and max_files from cfg log once
-	 * - Validates every value explicitly
-	 * - Stores the derived scalar runtime state
-	 * - Releases constructor options after initialization
-	 *
-	 * Notes:
-	 * - A missing log node or key throws \OutOfBoundsException
-	 * - This service does not depend on the concrete Cfg class directly
-	 * - Grossly invalid log node shape is allowed to fail fast during child access
-	 *   instead of being rewrapped into a logger-specific exception
+	 * - Creates the log directory, parents included, when it is missing.
 	 *
 	 * @return void
-	 * @throws LogConfigException When supported logger configuration values are invalid.
-	 * @throws LogDirectoryException When the configured log directory cannot be used.
+	 * @throws \CitOmni\Infrastructure\Exception\LogConfigException  When cfg log.path or log.default_file is not a non-empty string, log.max_bytes is not an integer >= 1024, or log.max_files is neither null nor an integer >= 1.
+	 * @throws \CitOmni\Infrastructure\Exception\LogDirectoryException  When the directory cannot be created or is not writable.
+	 * @throws \CitOmni\Infrastructure\Exception\LogFileException  When cfg log.default_file is not a valid log file name.
+	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
 		$logCfg = $this->app->cfg->log;
@@ -123,12 +114,19 @@ class Log extends BaseService {
 
 
 	/**
-	 * Sets and validates the default log directory.
+	 * Set the log directory for all later writes of this instance.
 	 *
-	 * @param string $dir Absolute or relative directory path.
-	 * @param bool $autoCreate Whether the directory should be created automatically when missing.
+	 * Behavior:
+	 * - With $autoCreate, a missing directory is created with mode 0755, parents included.
+	 *
+	 * Notes:
+	 * - The service is shared within a request or process, so the change applies to every
+	 *   caller.
+	 *
+	 * @param  string  $dir  Directory path; trailing slashes, backslashes and whitespace are ignored.
+	 * @param  bool  $autoCreate  Create the directory when it is missing.
 	 * @return void
-	 * @throws LogDirectoryException When the directory cannot be created, found, or written.
+	 * @throws \CitOmni\Infrastructure\Exception\LogDirectoryException  When the path is empty, or the directory is missing and not created, or it is not writable.
 	 */
 	public function setDir(string $dir, bool $autoCreate = false): void {
 		$dir = $this->normalizeDirectory($dir);
@@ -152,11 +150,11 @@ class Log extends BaseService {
 
 
 	/**
-	 * Sets the maximum active log file size before rotation.
+	 * Set the size at which a log file is rotated, for all later writes of this instance.
 	 *
-	 * @param int $bytes Maximum size in bytes, must be >= 1024.
+	 * @param  int  $bytes  Size in bytes, >= 1024.
 	 * @return void
-	 * @throws LogConfigException When the size is invalid.
+	 * @throws \CitOmni\Infrastructure\Exception\LogConfigException  When $bytes is below 1024.
 	 */
 	public function setMaxFileSize(int $bytes): void {
 		if ($bytes < self::MIN_MAX_FILE_SIZE) {
@@ -168,11 +166,11 @@ class Log extends BaseService {
 
 
 	/**
-	 * Sets the maximum number of rotated files to keep.
+	 * Set how many rotated files are kept per log file, for all later writes of this instance.
 	 *
-	 * @param int|null $count Maximum rotated files to keep, or null for unlimited.
+	 * @param  int|null  $count  Number of files, >= 1, or null to keep all.
 	 * @return void
-	 * @throws LogConfigException When the count is invalid.
+	 * @throws \CitOmni\Infrastructure\Exception\LogConfigException  When $count is below 1.
 	 */
 	public function setMaxRotatedFiles(?int $count): void {
 		if ($count !== null && $count < 1) {
@@ -184,25 +182,33 @@ class Log extends BaseService {
 
 
 	/**
-	 * Writes a single log entry to the configured log directory.
+	 * Append one entry to a log file as a JSON line.
 	 *
 	 * Behavior:
-	 * - Resolves null or empty $file to the configured default file
-	 * - Normalizes valid flat names to ".jsonl"
-	 * - Acquires an exclusive lock on a sidecar lock file
-	 * - Rotates before append when the current file already exceeds the limit
-	 * - Appends a single JSON line using "\n"
-	 * - Rotates again after append when the write crossed the limit
-	 * - Treats pruning failures as non-fatal housekeeping failures
+	 * - The line is a JSON object with timestamp (local time, DATE_ATOM), category, message
+	 *   and, when not empty, context.
+	 * - A payload that json_encode() rejects is encoded once more with strings converted to
+	 *   UTF-8, arrays cut at MAX_NORMALIZE_DEPTH and objects replaced by their class name. If
+	 *   that fails too, the line holds timestamp, category and the JSON error only.
+	 * - $file null or '' writes to the default file; any other name gets the extension .jsonl.
+	 * - A file already at or above the size limit is rotated before the append, and a file that
+	 *   reaches the limit with the append is rotated after it. The rotated file is renamed to
+	 *   NAME_YYYYMMDD_HHMMSS_PID.jsonl in UTC, with _N added for further rotations within the
+	 *   same second. Each rotation then deletes the oldest rotated files beyond the kept number.
+	 * - Appends, rotations and deletions of one file are serialized across processes by an
+	 *   exclusive lock on a .lock file next to it.
 	 *
-	 * @param string|null $file Target log file name without subdirectories. Null or empty uses the default file.
-	 * @param string $category Application-defined category.
-	 * @param string|array|object $message Message payload to serialize into JSON.
-	 * @param array $context Optional structured context data.
+	 * Typical usage:
+	 *   $this->app->log->write('auth.jsonl', 'auth.login', 'User logged in', ['user_id' => 42]);
+	 *
+	 * @param  string|null  $file  File name without directory: ASCII letters, digits, ., _ and -, not starting with a dot; null or '' for the default file.
+	 * @param  string  $category  Category chosen by the caller, such as auth.login.
+	 * @param  string|array<array-key,mixed>|object  $message  Message payload.
+	 * @param  array<array-key,mixed>  $context  Extra structured data; left out of the line when empty.
 	 * @return void
-	 * @throws LogFileException When file validation, lock opening, lock acquisition, or append opening fails.
-	 * @throws LogWriteException When the entry cannot be written completely.
-	 * @throws LogRotationException When rotation fails.
+	 * @throws \CitOmni\Infrastructure\Exception\LogFileException  When the file name is invalid, or the lock file or the log file cannot be opened or locked.
+	 * @throws \CitOmni\Infrastructure\Exception\LogWriteException  When the line is not written completely.
+	 * @throws \CitOmni\Infrastructure\Exception\LogRotationException  When a full file cannot be renamed.
 	 */
 	public function write(?string $file, string $category, string|array|object $message, array $context = []): void {
 		$file = ($file === null || $file === '') ? $this->defaultFile : $this->normalizeFilename($file);
@@ -262,11 +268,11 @@ class Log extends BaseService {
 
 
 	/**
-	 * Normalizes a directory path to a directory string with trailing separator.
+	 * Return a directory path with exactly one trailing separator.
 	 *
-	 * @param string $dir Directory path to normalize.
-	 * @return string Normalized directory path with trailing separator.
-	 * @throws LogDirectoryException When the path is empty.
+	 * @param  string  $dir  Directory path; trailing slashes, backslashes and whitespace are removed.
+	 * @return string
+	 * @throws \CitOmni\Infrastructure\Exception\LogDirectoryException  When nothing remains.
 	 */
 	private function normalizeDirectory(string $dir): string {
 		$dir = \rtrim($dir, "/\\ \t\n\r\0\x0B");
@@ -279,29 +285,18 @@ class Log extends BaseService {
 
 
 	/**
-	 * Validates and normalizes a flat log filename to ".jsonl".
+	 * Check a log file name and return it with the extension .jsonl.
 	 *
-	 * Accepted policy:
-	 * - ASCII letters, digits, ".", "_" and "-" only
-	 * - No subdirectories
-	 * - No hidden-file style names starting with "."
-	 * - No dot-only or otherwise meaningless base names
-	 * - Valid flat names are normalized to end with ".jsonl"
+	 * Behavior:
+	 * - Accepts ASCII letters, digits, ., _ and - only, without a leading dot, so .env and
+	 *   ../app.log are rejected.
+	 * - Replaces the last extension with .jsonl, or adds it: app and app.log become app.jsonl,
+	 *   and audit.jsonl stays.
+	 * - Rejects a name whose part before the last dot is empty or only dots.
 	 *
-	 * Examples:
-	 * - "app" => "app.jsonl"
-	 * - "app.log" => "app.jsonl"
-	 * - "audit.jsonl" => "audit.jsonl"
-	 *
-	 * Rejected examples:
-	 * - ".env"
-	 * - ".log"
-	 * - "..."
-	 * - "../app.log"
-	 *
-	 * @param string $file File name to normalize.
-	 * @return string Normalized ".jsonl" file name.
-	 * @throws LogFileException When the file name is invalid.
+	 * @param  string  $file  File name without directory.
+	 * @return string
+	 * @throws \CitOmni\Infrastructure\Exception\LogFileException  When the name is not accepted.
 	 */
 	private function normalizeFilename(string $file): string {
 		if ($file === '') {
@@ -342,20 +337,17 @@ class Log extends BaseService {
 
 
 	/**
-	 * Encodes a single log entry as a JSON line.
+	 * Encode one entry as a JSON line.
 	 *
 	 * Behavior:
-	 * - First attempts normal encoding with UTF-8 substitution support
-	 * - Falls back to explicit bounded normalization only when necessary
-	 * - Emits a deterministic fallback line if JSON still cannot be produced
+	 * - Encodes the entry as given when json_encode() accepts it.
+	 * - Otherwise encodes it once more after normalizeEncodableValue(), and as a last resort
+	 *   returns the line of buildFallbackLine().
 	 *
-	 * Notes:
-	 * - The fallback path avoids deep or cyclic object traversal
-	 *
-	 * @param string $category Entry category.
-	 * @param string|array|object $message Entry message payload.
-	 * @param array $context Optional context payload.
-	 * @return string JSON line ending with "\n".
+	 * @param  string  $category  Category of the entry.
+	 * @param  string|array<array-key,mixed>|object  $message  Message payload.
+	 * @param  array<array-key,mixed>  $context  Extra data; left out when empty.
+	 * @return string  JSON line ending in "\n".
 	 */
 	private function encodeJsonLine(string $category, string|array|object $message, array $context): string {
 		$timestamp = \date(\DATE_ATOM);
@@ -385,22 +377,23 @@ class Log extends BaseService {
 
 
 	/**
-	 * Rotates the active log file while the caller holds the lock.
+	 * Rotate an active log file; the caller holds its lock.
 	 *
 	 * Behavior:
-	 * - Renames the active file to "<name>_<Ymd>_<His>_<pid>.jsonl", with the current time in UTC
-	 * - A later rotation within the same second gets "_<n>" appended, numbered past every
-	 *   rotated file of that second from any process, so a name freed by pruning is never
-	 *   reused and the numbers follow the order of the rotations
+	 * - Renames the file to NAME_YYYYMMDD_HHMMSS_PID.jsonl, with the current time in UTC.
+	 * - A later rotation within the same second gets _N appended, numbered past every rotated
+	 *   file of that second from any process, so a name freed by pruning is never reused and
+	 *   the numbers follow the order of the rotations.
+	 * - Does nothing when the file does not exist.
 	 *
 	 * Notes:
-	 * - The name uses UTC (gmdate()), so processes with different time zones number and
-	 *   order their rotations alike.
+	 * - The name uses UTC (gmdate()), so processes with different time zones number and order
+	 *   their rotations alike.
 	 * - The directory is listed with scandir(), so its path is used literally.
 	 *
-	 * @param string $filePath Active log file path.
+	 * @param  string  $filePath  Path of the active log file.
 	 * @return void
-	 * @throws LogRotationException When rename fails.
+	 * @throws \CitOmni\Infrastructure\Exception\LogRotationException  When the rename fails.
 	 */
 	private function rotateLocked(string $filePath): void {
 		if (!\is_file($filePath)) {
@@ -436,26 +429,27 @@ class Log extends BaseService {
 
 
 	/**
-	 * Prunes old rotated files while the caller holds the lock.
+	 * Delete the oldest rotated files of a log file beyond the kept number; the caller holds its lock.
 	 *
 	 * Behavior:
-	 * - Considers only files named like rotations of this log file ("<name>_<Ymd>_<His>_<pid>[_<n>].jsonl");
-	 *   other logs whose names start with "<name>_" are left alone, unless their own name has that form
-	 * - Deletes the oldest rotated files until max_files remain, ordered by:
-	 *   1) modification time
-	 *   2) the timestamp in the name
-	 *   3) the sequence number in the name, compared as a number
-	 * - Non-fatal by design
-	 * - Only housekeeping failures are softened in this service
+	 * - Considers only files named like rotations of this log file,
+	 *   NAME_YYYYMMDD_HHMMSS_PID.jsonl with an optional _N before the extension. Another log
+	 *   whose name starts with NAME_ is left alone unless its own name has that form.
+	 * - Deletes the oldest ones until the kept number remains, ordered by:
+	 *     1) modification time
+	 *     2) the timestamp in the name
+	 *     3) the sequence number in the name, compared as a number
+	 * - Never fails: A directory that cannot be listed or a file that cannot be deleted is
+	 *   skipped.
 	 *
 	 * Notes:
-	 * - Modification times have a resolution of one second, so the name only orders the rotations
-	 *   within one second. Names in another time zone, such as the local-time names of earlier
-	 *   versions, therefore cannot reorder files from different seconds.
-	 * - The directory is listed with scandir() and filtered by name, so its path is used literally;
-	 *   glob() would read "[", "*" and "?" in the path as a pattern and could match another directory.
+	 * - Modification times have a resolution of one second, so the name only orders the
+	 *   rotations within one second. Names in another time zone, such as local-time names,
+	 *   therefore cannot reorder files from different seconds.
+	 * - The directory is listed with scandir() and filtered by name, so its path is used
+	 *   literally; glob() would read [, * and ? in the path as a pattern.
 	 *
-	 * @param string $filePath Active log file path used as the rotation family anchor.
+	 * @param  string  $filePath  Path of the active log file whose rotations are pruned.
 	 * @return void
 	 */
 	private function pruneLocked(string $filePath): void {
@@ -501,11 +495,11 @@ class Log extends BaseService {
 
 
 	/**
-	 * Parses the name of a rotated file.
+	 * Parse the name of a rotated file.
 	 *
-	 * @param string $name File name to parse, e.g. "app_20260101_120000_4242_3.jsonl".
-	 * @param string $filename Log file name without extension, e.g. "app".
-	 * @return array{0: string, 1: int}|null The timestamp ("Ymd_His") and sequence number, or null when $name is not a rotated file of $filename.
+	 * @param  string  $name  File name, such as app_20260101_120000_4242_3.jsonl.
+	 * @param  string  $filename  Log file name without extension, such as app.
+	 * @return array{0:string,1:int}|null  Timestamp YYYYMMDD_HHMMSS and sequence number; null when $name is not a rotated file of $filename.
 	 */
 	private function rotatedFileKey(string $name, string $filename): ?array {
 		// Cheap prefix test first; the directory listing holds every file in the directory.
@@ -522,22 +516,19 @@ class Log extends BaseService {
 
 
 	/**
-	 * Normalizes values into a form that is more likely to encode successfully.
+	 * Make a value more likely to encode as JSON, giving up detail where needed.
 	 *
 	 * Behavior:
-	 * - Strings are preserved when already valid UTF-8
-	 * - Invalid strings are converted with a bounded fallback path
-	 * - Arrays are normalized recursively up to a fixed maximum depth
-	 * - Objects are reduced to a deterministic placeholder structure
+	 * - Strings, string keys included, are converted to UTF-8 by normalizeString().
+	 * - Arrays are walked to MAX_NORMALIZE_DEPTH levels; a deeper value becomes the string
+	 *   [max-normalize-depth-exceeded].
+	 * - An object becomes ['__log_object' => its class name]; its properties are not walked,
+	 *   so a cycle cannot recurse.
+	 * - Other values pass unchanged.
 	 *
-	 * Notes:
-	 * - This fallback is intentionally bounded to avoid deep or cyclic traversal
-	 * - Object handling is intentionally lossy and does not traverse object graphs
-	 * - This fallback exists for logging robustness, not for full object serialization fidelity
-	 *
-	 * @param mixed $value Value to normalize.
-	 * @param int $depth Current normalization depth.
-	 * @return mixed Normalized value.
+	 * @param  mixed  $value  Value to normalize.
+	 * @param  int  $depth  Current depth; 0 at the top.
+	 * @return mixed
 	 */
 	private function normalizeEncodableValue(mixed $value, int $depth = 0): mixed {
 		if ($depth >= self::MAX_NORMALIZE_DEPTH) {
@@ -568,10 +559,19 @@ class Log extends BaseService {
 
 
 	/**
-	 * Normalizes a string toward valid UTF-8 using a cheap bounded fallback path.
+	 * Return a string as UTF-8, converting it from CP1252 or ISO-8859-1 when it is not valid UTF-8.
 	 *
-	 * @param string $value String to normalize.
-	 * @return string UTF-8 safe string.
+	 * Behavior:
+	 * - Valid UTF-8 passes unchanged.
+	 * - Otherwise the first conversion with a non-empty, valid result wins: CP1252, then
+	 *   ISO-8859-1. Without one, the string is returned with ASCII control characters removed.
+	 *
+	 * Notes:
+	 * - Without mbstring, no string counts as valid UTF-8 and every iconv result is accepted
+	 *   unchecked, so valid UTF-8 is converted as if it were CP1252.
+	 *
+	 * @param  string  $value  String to convert.
+	 * @return string
 	 */
 	private function normalizeString(string $value): string {
 		if (\function_exists('mb_check_encoding') && \mb_check_encoding($value, 'UTF-8')) {
@@ -606,17 +606,16 @@ class Log extends BaseService {
 
 
 	/**
-	 * Builds a deterministic fallback line when JSON encoding still fails.
+	 * Build the line for an entry that cannot be encoded at all.
 	 *
 	 * Behavior:
-	 * - Preserves the original category when practical
-	 * - Sanitizes the category conservatively for safe fallback output
-	 * - Does not attempt to preserve the full original payload
+	 * - Holds the timestamp, the cleaned category and a message with the JSON error; message
+	 *   and context of the entry are dropped.
 	 *
-	 * @param string $timestamp Precomputed entry timestamp.
-	 * @param string $category Original entry category.
-	 * @param string $error Json encoding error message.
-	 * @return string Fallback JSON line.
+	 * @param  string  $timestamp  Timestamp of the entry.
+	 * @param  string  $category  Category of the entry.
+	 * @param  string  $error  Message of the last json_encode() error.
+	 * @return string  JSON line ending in "\n".
 	 */
 	private function buildFallbackLine(string $timestamp, string $category, string $error): string {
 		$safeCategory = $this->sanitizeFallbackCategory($category);
@@ -637,10 +636,10 @@ class Log extends BaseService {
 
 
 	/**
-	 * Sanitizes a category string for deterministic fallback output.
+	 * Clean a category for the fallback line.
 	 *
-	 * @param string $category Original category.
-	 * @return string Sanitized category.
+	 * @param  string  $category  Category of the entry.
+	 * @return string  Converted by normalizeString() and without control characters; 'error' when nothing remains.
 	 */
 	private function sanitizeFallbackCategory(string $category): string {
 		$category = $this->normalizeString($category);
