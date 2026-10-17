@@ -11,7 +11,7 @@ php tests/log/run.php
 Expected result:
 
 ```
-21 passed, 0 failed, 1 skipped
+24 passed, 0 failed, 1 skipped
 ```
 
 The skipped check starts several writer processes at once. It runs only when `CITOMNI_TEST_PARALLEL` is `1`:
@@ -29,7 +29,7 @@ php tests/log/run.php
 Expected result with the multi-process check:
 
 ```
-22 passed, 0 failed
+25 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -42,6 +42,9 @@ The real service runs on the kernel doubles in `tests/support/doubles.php`. `CIT
 |---|---|
 | `run.php` | Runner and checks. |
 | `worker.php` | Child for the multi-process check. Builds the service, reports ready through a file, waits for the start gate, then writes its records. The gate opens only when every worker is ready. |
+| `probe.php` | Child for the normalization checks. Writes fixed entries that reach the normalization fallback and the fallback line. |
+
+The normalization checks run `probe.php` with the same PHP binary and php.ini and compare its records with one expected list. An extension cannot be unloaded at runtime, so the checks without mbstring and without iconv add `-d disable_functions=...` with the functions in question.
 
 Rotated names carry the UTC time of the rotation. Pruning orders rotated files by modification time, and files modified within the same second by the timestamp and sequence number in their names. The first pruning check ages the rotated files by ten seconds after each write instead of sleeping, so the rotations look seconds apart. The checks for rotations within one second start right after a new second has begun; the other pruning checks seed files with chosen names and modification times.
 
@@ -57,6 +60,9 @@ The checks marked as regressions failed before the fix they cover; all other che
 | each entry is one JSON line: timestamp, category, message, then context only when non-empty | Line format, key order, `DATE_ATOM` |
 | unicode and slashes are written unescaped, invalid UTF-8 is substituted | JSON flags |
 | objects are encoded as JSON, and entries JSON cannot encode keep timestamp and category | Objects, the bounded normalization fallback, the fallback line |
+| the normalization fallback keeps valid UTF-8 and decodes other strings from CP1252 | Strings, string keys and the fallback line's category. The five bytes CP1252 leaves undefined become U+FFFD |
+| the normalization fallback gives the same result without mbstring | Regression: without `mb_check_encoding()` every string counted as invalid UTF-8, so valid UTF-8 was converted as if it were CP1252 |
+| the normalization fallback gives the same result without iconv | Regression: without `iconv()` the conversion threw `\Error` for a string that is not valid UTF-8, so `write()` threw instead of writing the entry or its fallback line |
 | flat file names are normalized to .jsonl | File name normalization |
 | unsafe file names are rejected without creating files | Path traversal, hidden files, characters outside `[A-Za-z0-9._-]` |
 | invalid cfg values are rejected at init | `path`, `default_file`, `max_bytes`, `max_files` |

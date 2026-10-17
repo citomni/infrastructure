@@ -86,6 +86,15 @@ const PARALLEL_RECORDS = 150;
 /** Name of a rotated file in the "app" family: app_<Ymd>_<His>_<pid>[_<n>].jsonl. */
 const ROTATED_APP = '/^app_\d{8}_\d{6}_\d+(?:_\d+)?\.jsonl$/';
 
+/** Category, message and context of each record probe.php writes; "fallback" stands for the message of a fallback line. */
+const PROBE_RECORDS = [
+	['valid.æøå', 'Søren æøå € 😀', ['cycle' => ['__log_object' => 'stdClass'], 'nøgle' => 'værdi']],
+	['cp1252', 'Søren æøå €', ['cycle' => ['__log_object' => 'stdClass'], 'nøgle' => 'værdi']],
+	['undefined', "a\u{FFFD}b\u{FFFD}c\u{FFFD}d\u{FFFD}e\u{FFFD}f", ['cycle' => ['__log_object' => 'stdClass']]],
+	['fallback.æøå', 'fallback', null],
+	['fallback.æøå', 'fallback', null],
+];
+
 
 // ----------------------------------------------------------------
 // Helpers
@@ -180,6 +189,24 @@ function waitForNextSecond(): void {
 }
 
 
+/**
+ * Run probe.php with $phpArgs before the script and return its records in the form of PROBE_RECORDS.
+ *
+ * @param  list<string>  $phpArgs  PHP options, such as -d settings.
+ * @return list<array{0:mixed,1:mixed,2:mixed}>
+ */
+function probeRecords(array $phpArgs): array {
+	$dir  = freshDir();
+	$exit = \proc_close(startPhp([...$phpArgs, __DIR__ . '/probe.php', $dir . '/logs'], $dir . '/probe.out', $dir . '/probe.err'));
+	same(0, $exit, 'probe exit code (' . childReport($exit, $dir . '/probe.out', $dir . '/probe.err') . ')');
+	return \array_map(static fn(array $record): array => [
+		$record['category'],
+		\str_starts_with((string)$record['message'], 'Log fallback: JSON encode failed') ? 'fallback' : $record['message'],
+		$record['context'] ?? null,
+	], readJsonLines($dir . '/logs/probe.jsonl'));
+}
+
+
 // ----------------------------------------------------------------
 // Checks
 // ----------------------------------------------------------------
@@ -262,6 +289,24 @@ $checks = [
 		same('[max-normalize-depth-exceeded]', $leaf, 'leaf of the deep message (' . $levels . ' levels kept)');
 		same('infinite', $records[3]['category'], 'fallback category');
 		expect(\str_starts_with((string)$records[3]['message'], 'Log fallback: JSON encode failed'), 'fallback message: ' . export($records[3]['message']));
+	},
+
+	'the normalization fallback keeps valid UTF-8 and decodes other strings from CP1252' => static function (): void {
+		same(PROBE_RECORDS, probeRecords([]), 'records');
+	},
+
+	// Regression: without mbstring every string counted as invalid UTF-8, so valid
+	// UTF-8 was converted as if it were CP1252. An extension cannot be unloaded at
+	// runtime, so the probe runs with the mbstring functions Log used disabled.
+	'the normalization fallback gives the same result without mbstring' => static function (): void {
+		same(PROBE_RECORDS, probeRecords(['-d', 'disable_functions=mb_check_encoding,mb_convert_encoding']), 'records');
+	},
+
+	// Regression: without iconv the conversion threw \Error for a string that is
+	// not valid UTF-8, so write() threw instead of writing the entry or its
+	// fallback line.
+	'the normalization fallback gives the same result without iconv' => static function (): void {
+		same(PROBE_RECORDS, probeRecords(['-d', 'disable_functions=iconv']), 'records');
 	},
 
 	'flat file names are normalized to .jsonl' => static function (): void {

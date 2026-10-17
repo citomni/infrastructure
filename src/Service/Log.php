@@ -55,6 +55,42 @@ class Log extends BaseService {
 	/** ASCII control characters except tab, line feed and carriage return. */
 	private const CONTROL_CHARS_PATTERN = '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/';
 
+	/** UTF-8 for each byte 0x80-0xFF read as CP1252; U+FFFD where CP1252 leaves a byte undefined. */
+	private const CP1252_TO_UTF8 = [
+		"\x80" => "\u{20AC}", "\x81" => "\u{FFFD}", "\x82" => "\u{201A}", "\x83" => "\u{0192}",
+		"\x84" => "\u{201E}", "\x85" => "\u{2026}", "\x86" => "\u{2020}", "\x87" => "\u{2021}",
+		"\x88" => "\u{02C6}", "\x89" => "\u{2030}", "\x8A" => "\u{0160}", "\x8B" => "\u{2039}",
+		"\x8C" => "\u{0152}", "\x8D" => "\u{FFFD}", "\x8E" => "\u{017D}", "\x8F" => "\u{FFFD}",
+		"\x90" => "\u{FFFD}", "\x91" => "\u{2018}", "\x92" => "\u{2019}", "\x93" => "\u{201C}",
+		"\x94" => "\u{201D}", "\x95" => "\u{2022}", "\x96" => "\u{2013}", "\x97" => "\u{2014}",
+		"\x98" => "\u{02DC}", "\x99" => "\u{2122}", "\x9A" => "\u{0161}", "\x9B" => "\u{203A}",
+		"\x9C" => "\u{0153}", "\x9D" => "\u{FFFD}", "\x9E" => "\u{017E}", "\x9F" => "\u{0178}",
+		"\xA0" => "\u{00A0}", "\xA1" => "\u{00A1}", "\xA2" => "\u{00A2}", "\xA3" => "\u{00A3}",
+		"\xA4" => "\u{00A4}", "\xA5" => "\u{00A5}", "\xA6" => "\u{00A6}", "\xA7" => "\u{00A7}",
+		"\xA8" => "\u{00A8}", "\xA9" => "\u{00A9}", "\xAA" => "\u{00AA}", "\xAB" => "\u{00AB}",
+		"\xAC" => "\u{00AC}", "\xAD" => "\u{00AD}", "\xAE" => "\u{00AE}", "\xAF" => "\u{00AF}",
+		"\xB0" => "\u{00B0}", "\xB1" => "\u{00B1}", "\xB2" => "\u{00B2}", "\xB3" => "\u{00B3}",
+		"\xB4" => "\u{00B4}", "\xB5" => "\u{00B5}", "\xB6" => "\u{00B6}", "\xB7" => "\u{00B7}",
+		"\xB8" => "\u{00B8}", "\xB9" => "\u{00B9}", "\xBA" => "\u{00BA}", "\xBB" => "\u{00BB}",
+		"\xBC" => "\u{00BC}", "\xBD" => "\u{00BD}", "\xBE" => "\u{00BE}", "\xBF" => "\u{00BF}",
+		"\xC0" => "\u{00C0}", "\xC1" => "\u{00C1}", "\xC2" => "\u{00C2}", "\xC3" => "\u{00C3}",
+		"\xC4" => "\u{00C4}", "\xC5" => "\u{00C5}", "\xC6" => "\u{00C6}", "\xC7" => "\u{00C7}",
+		"\xC8" => "\u{00C8}", "\xC9" => "\u{00C9}", "\xCA" => "\u{00CA}", "\xCB" => "\u{00CB}",
+		"\xCC" => "\u{00CC}", "\xCD" => "\u{00CD}", "\xCE" => "\u{00CE}", "\xCF" => "\u{00CF}",
+		"\xD0" => "\u{00D0}", "\xD1" => "\u{00D1}", "\xD2" => "\u{00D2}", "\xD3" => "\u{00D3}",
+		"\xD4" => "\u{00D4}", "\xD5" => "\u{00D5}", "\xD6" => "\u{00D6}", "\xD7" => "\u{00D7}",
+		"\xD8" => "\u{00D8}", "\xD9" => "\u{00D9}", "\xDA" => "\u{00DA}", "\xDB" => "\u{00DB}",
+		"\xDC" => "\u{00DC}", "\xDD" => "\u{00DD}", "\xDE" => "\u{00DE}", "\xDF" => "\u{00DF}",
+		"\xE0" => "\u{00E0}", "\xE1" => "\u{00E1}", "\xE2" => "\u{00E2}", "\xE3" => "\u{00E3}",
+		"\xE4" => "\u{00E4}", "\xE5" => "\u{00E5}", "\xE6" => "\u{00E6}", "\xE7" => "\u{00E7}",
+		"\xE8" => "\u{00E8}", "\xE9" => "\u{00E9}", "\xEA" => "\u{00EA}", "\xEB" => "\u{00EB}",
+		"\xEC" => "\u{00EC}", "\xED" => "\u{00ED}", "\xEE" => "\u{00EE}", "\xEF" => "\u{00EF}",
+		"\xF0" => "\u{00F0}", "\xF1" => "\u{00F1}", "\xF2" => "\u{00F2}", "\xF3" => "\u{00F3}",
+		"\xF4" => "\u{00F4}", "\xF5" => "\u{00F5}", "\xF6" => "\u{00F6}", "\xF7" => "\u{00F7}",
+		"\xF8" => "\u{00F8}", "\xF9" => "\u{00F9}", "\xFA" => "\u{00FA}", "\xFB" => "\u{00FB}",
+		"\xFC" => "\u{00FC}", "\xFD" => "\u{00FD}", "\xFE" => "\u{00FE}", "\xFF" => "\u{00FF}",
+	];
+
 	/** Log directory with a trailing separator. */
 	private string $dir = '';
 
@@ -559,49 +595,28 @@ class Log extends BaseService {
 
 
 	/**
-	 * Return a string as UTF-8, converting it from CP1252 or ISO-8859-1 when it is not valid UTF-8.
+	 * Return a string as UTF-8, decoding it from CP1252 when it is not valid UTF-8.
 	 *
 	 * Behavior:
 	 * - Valid UTF-8 passes unchanged.
-	 * - Otherwise the first conversion with a non-empty, valid result wins: CP1252, then
-	 *   ISO-8859-1. Without one, the string is returned with ASCII control characters removed.
+	 * - Any other string is decoded byte by byte as CP1252. The five bytes CP1252 leaves
+	 *   undefined, 0x81, 0x8D, 0x8F, 0x90 and 0x9D, become U+FFFD.
 	 *
 	 * Notes:
-	 * - Without mbstring, no string counts as valid UTF-8 and every iconv result is accepted
-	 *   unchecked, so valid UTF-8 is converted as if it were CP1252.
+	 * - The result is the same on every PHP build, with or without mbstring and iconv.
 	 *
 	 * @param  string  $value  String to convert.
-	 * @return string
+	 * @return string  Valid UTF-8.
 	 */
 	private function normalizeString(string $value): string {
-		if (\function_exists('mb_check_encoding') && \mb_check_encoding($value, 'UTF-8')) {
+		// An empty pattern with the u modifier matches exactly when the subject is valid UTF-8.
+		if (\preg_match('//u', $value) === 1) {
 			return $value;
 		}
 
-		$converted = @\iconv('CP1252', 'UTF-8//IGNORE', $value);
-		if (\is_string($converted) && $converted !== '') {
-			if (!\function_exists('mb_check_encoding') || \mb_check_encoding($converted, 'UTF-8')) {
-				return $converted;
-			}
-		}
-
-		if (\function_exists('mb_convert_encoding')) {
-			$converted = @\mb_convert_encoding($value, 'UTF-8', 'ISO-8859-1');
-			if (\is_string($converted) && $converted !== '') {
-				if (!\function_exists('mb_check_encoding') || \mb_check_encoding($converted, 'UTF-8')) {
-					return $converted;
-				}
-			}
-		} else {
-			$converted = @\iconv('ISO-8859-1', 'UTF-8//IGNORE', $value);
-			if (\is_string($converted) && $converted !== '') {
-				if (!\function_exists('mb_check_encoding') || \mb_check_encoding($converted, 'UTF-8')) {
-					return $converted;
-				}
-			}
-		}
-
-		return \preg_replace(self::CONTROL_CHARS_PATTERN, '', $value) ?? '';
+		// A table instead of iconv or mbstring: both are optional extensions, and they do not
+		// agree on the undefined bytes.
+		return \strtr($value, self::CP1252_TO_UTF8);
 	}
 
 
