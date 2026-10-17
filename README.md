@@ -1179,7 +1179,7 @@ This package is intentionally smaller than an all-purpose infrastructure framewo
 - `BruteForce` requires a separately installed table and application-owned maintenance scheduling.
 - `formatNumber` is a compatibility service marked deprecated by the registry.
 
-The package also contains legacy model helper files under `src/Model/`. Those are not registered services and should not be confused with the current native `Db` API; in particular, the older LiteMySQLi model depends on a separate legacy class not declared as a runtime Composer requirement.
+The package also contains a legacy model base class, `BaseModelLiteMySQLi`, under `src/Model/`. It is not a registered service and should not be confused with the current native `Db` API; it depends on the LiteMySQLi class, which is not declared as a runtime Composer requirement.
 
 ---
 
@@ -1234,8 +1234,7 @@ src/
 │   ├── TxtConfigException.php
 │   └── Value*.php
 ├── Model/
-│   ├── BaseModelLiteMySQLi.php
-│   └── LiteDbBenchModel.php
+│   └── BaseModelLiteMySQLi.php
 ├── Repository/
 │   ├── BruteForceRepository.php
 │   └── DatabaseSchemaRepository.php

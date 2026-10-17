@@ -26,9 +26,17 @@ use LiteMySQLi\LiteMySQLi;
  * through the db service. The driver, its API and its failures belong to LiteMySQLi, which
  * the app must install itself.
  *
+ * Legacy: The class stays only until the packages that still extend it use the db service,
+ * and is removed then. Its differences from the db service are accepted, such as the fixed
+ * secret db.password and the ignored cfg db.password_secret, db.port and db.socket. Do not
+ * extend it, align it with the db service or report those differences.
+ *
  * Rules:
  * - Open no connection before the first use.
  * - Catch nothing: Cfg, secret and driver failures reach the global error handler.
+ * - Change it only to keep the packages that extend it running until the removal.
+ *
+ * @deprecated  Use the db service and Repositories. Removed once no package extends this class.
  */
 abstract class BaseModelLiteMySQLi {
 
