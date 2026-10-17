@@ -19,13 +19,15 @@ namespace CitOmni\Infrastructure\Tests\Mailer;
  * Minimal SMTP server for the mailer suite. Not a suite of its own.
  *
  * Serves one connection at a time on 127.0.0.1:<port>. It advertises AUTH PLAIN
- * and no STARTTLS, accepts any credentials, rejects RCPT TO addresses in the
- * domain reject.invalid with 550, and appends every session to
- * <dir>/sessions.jsonl when the client quits or disconnects. On QUIT the session
- * is written before the 221 reply, so it is on disk when the client returns:
+ * and neither STARTTLS nor SMTPUTF8, accepts any credentials, rejects RCPT TO
+ * addresses in the domain reject.invalid with 550, leaves the end of the message
+ * data unanswered in a session with a recipient in the domain silent.invalid,
+ * and appends every session to <dir>/sessions.jsonl when the client quits or
+ * disconnects. On QUIT the session is written before the 221 reply, so it is on
+ * disk when the client returns:
  *
- *   {"auth": "<decoded PLAIN response>"|null, "from": "<address>"|null,
- *    "rcpt": ["<address>", ...], "data": "<message>"|null}
+ *   {"helo": "<EHLO or HELO argument>"|null, "auth": "<decoded PLAIN response>"|null,
+ *    "from": "<address>"|null, "rcpt": ["<address>", ...], "data": "<message>"|null}
  *
  * Usage (run.php starts it and stops it again):
  *   php smtp-server.php <port> <dir>
@@ -61,8 +63,9 @@ function address(string $line): string {
  */
 function serve($client, string $dir): void {
 	reply($client, '220 citomni.test ESMTP test server');
-	$session = ['auth' => null, 'from' => null, 'rcpt' => [], 'data' => null];
+	$session = ['helo' => null, 'auth' => null, 'from' => null, 'rcpt' => [], 'data' => null];
 	$active  = false;
+	$silent  = false;
 
 	while (($line = \fgets($client)) !== false) {
 		$active = true;
@@ -71,9 +74,11 @@ function serve($client, string $dir): void {
 
 		switch ($verb) {
 			case 'EHLO':
+				$session['helo'] = \trim(\substr($line, 4));
 				\fwrite($client, "250-citomni.test\r\n250-AUTH PLAIN\r\n250-8BITMIME\r\n250 SIZE 10240000\r\n");
 				break;
 			case 'HELO':
+				$session['helo'] = \trim(\substr($line, 4));
 				reply($client, '250 citomni.test');
 				break;
 			case 'AUTH':
@@ -100,6 +105,7 @@ function serve($client, string $dir): void {
 					reply($client, '550 5.1.1 Recipient rejected');
 				} else {
 					$session['rcpt'][] = $to;
+					$silent = $silent || \str_ends_with(\strtolower($to), '@silent.invalid');
 					reply($client, '250 2.1.5 OK');
 				}
 				break;
@@ -111,7 +117,10 @@ function serve($client, string $dir): void {
 					$data .= \str_starts_with($dataLine, '..') ? \substr($dataLine, 1) : $dataLine;
 				}
 				$session['data'] = $data;
-				reply($client, '250 2.0.0 Queued');
+				// Like a server that stops answering once it has the message.
+				if (!$silent) {
+					reply($client, '250 2.0.0 Queued');
+				}
 				break;
 			case 'RSET':
 			case 'NOOP':

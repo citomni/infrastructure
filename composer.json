@@ -35,8 +35,8 @@
 		"phpstan/phpstan": "^1.11"
 	},
 	"suggest": {
-		"ext-iconv": "Improves UTF-8 normalization in Mailer (fallbacks exist).",
-		"ext-mbstring": "Alternative for UTF-8 normalization in Mailer (fallbacks exist).",
+		"ext-intl": "Lets Mailer send to internationalized domain names, together with ext-mbstring.",
+		"ext-mbstring": "Lets Mailer send to internationalized domain names, together with ext-intl.",
 		"ext-opcache": "Better performance in production.",
 		"citomni/http": "HTTP runtime for request handling, views, and security integration.",
 		"citomni/cli": "CLI runtime for infrastructure-related commands, maintenance tasks, jobs, and developer tooling.",

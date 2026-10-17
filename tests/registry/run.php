@@ -396,7 +396,7 @@ $checks = [
 	// baseline key fails at the read instead of hiding behind a fallback.
 	'the cfg scan finds known reads in src/' => static function (): void {
 		$paths = \array_column(cfgReads(), 'path');
-		foreach (['db.host', 'log.max_files', 'curl.verify_peer', 'mail.smtp.auto_tls', 'locale.format.decimal_scale', 'locale.language'] as $known) {
+		foreach (['db.host', 'log.max_files', 'curl.verify_peer', 'mail.smtp.encryption', 'locale.format.decimal_scale', 'locale.language'] as $known) {
 			expect(\in_array($known, $paths, true), "scan missed {$known}; the patterns are stale");
 		}
 	},

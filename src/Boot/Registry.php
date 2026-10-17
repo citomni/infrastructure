@@ -98,37 +98,31 @@ class Registry {
 
 		'mail' => [
 			'from' => [
-				'email' => '', // Default sender address; '' sets none.
-				'name'  => '', // Display name of the default sender.
+				'email' => '', // Sender address of a message that names none; required, with an internationalized domain in punycode.
+				'name'  => '', // Display name of that sender; '' for none.
 			],
 
 			'reply_to' => [
-				'email' => '', // Default Reply-To address; '' sets none.
-				'name'  => '', // Display name of the default Reply-To address.
+				'email' => '', // Reply-To address of a message that names none; '' for none.
+				'name'  => '', // Display name of that address; '' for none.
 			],
 
-			'format'        => 'html', // Default body format: 'html' for HTML, any other value for plain text.
-			'transport'     => 'smtp', // 'smtp', 'sendmail' or 'qmail'; any other value sends with PHP's mail().
-			'sendmail_path' => '',     // Binary for the sendmail and qmail transports; '' for /usr/sbin/sendmail or /var/qmail/bin/sendmail.
+			'hostname'      => '',                   // Host name for the Message-ID header and the SMTP greeting; '' leaves the choice to PHPMailer.
+			'transport'     => 'smtp',               // 'smtp', 'sendmail', or 'mail' for PHP's mail().
+			'sendmail_path' => '/usr/sbin/sendmail', // Sendmail-compatible binary of the sendmail transport; required for that transport.
 
 			'smtp' => [
-				// The node holds no password; the secret mail.smtp.password does.
-				'host'       => '',    // SMTP host, or several hosts separated by ';'.
-				'port'       => 587,   // SMTP port.
-				'encryption' => null,  // 'tls' for STARTTLS, 'ssl' for implicit TLS; any other value for none.
-				'auth'       => true,  // Authenticate with username and the secret mail.smtp.password; must be a bool.
-				'username'   => '',    // SMTP user name; used when auth is true.
-				'auto_tls'   => true,  // Use STARTTLS when the server offers it, also with encryption none; must be a bool.
-				'timeout'    => 15,    // Timeout of SMTP operations in seconds.
-				'keepalive'  => false, // Keep the SMTP connection open between the messages of one service instance.
+				// The node holds no password; the secret that password_secret names does.
+				'host'            => '',                   // Host name or IP address, or several separated by ';' and tried in order, each optionally with ':port'; no ssl:// or tls:// prefix. Required for the smtp transport.
+				'port'            => 587,                  // TCP port, 1-65535.
+				'encryption'      => 'starttls',           // 'starttls' requires STARTTLS, 'smtps' connects with implicit TLS, 'none' sends everything unencrypted, the password included.
+				'username'        => '',                   // User name for SMTP authentication; '' sends without authentication.
+				'password_secret' => 'mail.smtp.password', // Secrets key that holds the SMTP password; read only when username is set.
+				'timeout'         => 15,                   // Seconds that connecting and each reply of the server may take, twice that for the reply to the message data; >= 1.
 			],
 
-			'logging' => [
-				'log_success'      => false, // Log every sent message to mail_log.jsonl; takes effect only when CITOMNI_ENVIRONMENT is dev.
-				'debug_transcript' => false, // Add the SMTP transcript to the error log of a failed send.
-				'max_lines'        => 200,   // Maximum number of transcript lines kept per send.
-				'include_bodies'   => false, // Log the full bodies of a failed send; false logs only their length and SHA-256.
-			],
+			'log_errors'  => true,  // Log sends that the transport refused, to mailer.jsonl.
+			'log_success' => false, // Log sends that the transport accepted, to mailer.jsonl.
 		],
 
 

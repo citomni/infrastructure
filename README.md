@@ -20,7 +20,7 @@ This is an **infrastructure package**, not an application framework, ORM, authen
 - **Environment-specific application secrets**, resolved lazily from app-local PHP files and never placed in normal configuration.
 - **PHP language-file lookup** for application and Composer-package translations, with deterministic `%PLACEHOLDER%` replacement.
 - **Outbound HTTP via cURL**, with a normalized response contract, optional connection reuse, and explicit redaction of selected query parameters.
-- **Email composition and delivery** through PHPMailer, including SMTP secrets, recipients, attachments, simple templates, and controlled diagnostics.
+- **Email delivery** through PHPMailer: one stateless call per message, with required STARTTLS by default, SMTP secrets, attachments, a generated plain-text part, and metadata-only logging.
 - **Database-backed brute-force protection** for identifiers and IP addresses, with independently configured contexts and bounded counters.
 - **Clear failure semantics**: invalid configuration and unavailable infrastructure fail visibly instead of silently switching strategies.
 - **No transport coupling**: the same services work in an HTTP controller, an application operation, a registered service, or a CLI command.
@@ -75,7 +75,7 @@ The package owns its technical service contracts and their shared mechanics:
 - App-local secrets loading and validation.
 - Language-file resolution, caching, and placeholder replacement.
 - cURL request construction, response normalization, and transport diagnostics.
-- PHPMailer integration, message state, SMTP configuration, and mail diagnostics.
+- PHPMailer integration, SMTP configuration, and mail diagnostics.
 - Brute-force counter rules and persistence through its own repositories.
 - Infrastructure-specific exceptions and a bounded transaction-isolation enum.
 
@@ -133,7 +133,7 @@ application and higher-level packages
 
 Optional integrations and performance aids:
 
-- `ext-iconv` or `ext-mbstring` for improved mailer text normalization.
+- `ext-intl` together with `ext-mbstring` for email addresses with an internationalized domain name, which PHPMailer then sends in punycode.
 - `ext-opcache` for production performance.
 - `citomni/http`, `citomni/cli`, or `citomni/authenticate` according to the host application's needs.
 - A reachable MySQL/MariaDB server for `db` and `bruteForce`. Database access is lazy, so unrelated services do not need to open a database connection.
@@ -262,7 +262,7 @@ The service map is the intended entry point. These are the primary methods curre
 | `secrets` | `has()`, `get()` |
 | `txt` | `get()` |
 | `curl` | `execute()` |
-| `mailer` | `from()`, `to()`, `cc()`, `bcc()`, `replyTo()`, `subject()`, `body()`, `altBody()`, `attach()`, `templateVars()`, `setTemplate()`, `send()`, `logEmails()`, `resetMessage()`, `refreshConfig()`, `getLastErrorMessage()`, `getLastErrorContext()` |
+| `mailer` | `send()` |
 | `bruteForce` | `assertStorageReady()`, `status()`, `record()`, `clear()`, `prune()` |
 | `formatNumber` | `toDb()`, `fromDb()` — deprecated |
 
@@ -803,81 +803,80 @@ Do not pass attacker-controlled URLs to cURL without application-level scheme/ho
 
 ## Email with Mailer
 
-`$this->app->mailer` wraps PHPMailer in a reusable, fluent service. It supports SMTP, PHP `mail()`, Sendmail, and Qmail transports.
-
-Configure `mail.from` and the selected transport before sending. SMTP credentials belong in the secret store, **not** under `mail.smtp.password` in the App config; the legacy config key is explicitly rejected.
+`$this->app->mailer->send()` sends one finished message per call through PHPMailer, over SMTP, a sendmail binary, or PHP's `mail()`. Every call builds its message on a new PHPMailer instance from its own arguments and the `mail` cfg; nothing carries over from one message to the next, so a failed or nested send cannot leak recipients, bodies, or transport state into another message.
 
 ```php
-$sent = $this->app->mailer
-	->to('customer@example.com', 'Customer')
-	->subject('Your receipt')
-	->body('<p>Thank you for your order.</p>', isHtml: true)
-	->altBody('Thank you for your order.')
-	->send();
+use CitOmni\Infrastructure\Exception\MailerSendException;
 
-if (!$sent) {
-	$error = $this->app->mailer->getLastErrorMessage();
-	// Let the owning workflow decide how to recover.
+try {
+	$messageId = $this->app->mailer->send(
+		to: ['customer@example.com' => 'Customer'],
+		subject: 'Your receipt',
+		html: '<p>Thank you for your order.</p>',
+	);
+} catch (MailerSendException $e) {
+	// The transport refused the message. Let the owning workflow decide whether to retry or queue.
+	$reason = $e->getMessage();
 }
 ```
 
-`send()` returns `bool` for PHPMailer send success/failure. Infrastructure errors outside that recoverable send path can still throw; do not assume every failure becomes `false`.
+`send()` returns the Message-ID header value once the transport has accepted the message for every recipient. Otherwise it throws, and the exception type says what happened:
 
-### Recipients and message composition
+| Exception | When | Was anything sent? |
+|---|---|---|
+| `InvalidArgumentException` | No recipient or body, `from` naming other than one address, a non-string entry, an internationalized domain that punycode cannot express, or an address or attachment that PHPMailer rejects | No |
+| `MailerException` | PHPMailer cannot build the message from valid arguments, such as when signing set up in a `newPhpMailer()` override fails | No |
+| `MailerSendException` | The transport did not confirm the message for every recipient: connection, TLS, authentication, a refused sender or recipient, or no answer in time | `$e->accepted` lists the recipients it confirmed; see below |
+| `OutOfBoundsException` and the other `Secrets` exceptions | The SMTP password secret is missing or unreadable | No |
+| `MailerConfigException` | A `mail` cfg value is invalid; thrown when the service is created, with the cfg path in `$e->path` | No |
 
-Available fluent methods include:
-
-```php
-$mailer = $this->app->mailer;
-
-$mailer
-	->from('no-reply@example.com', 'Example App')
-	->to('first@example.com')
-	->cc(['audit@example.com', 'team@example.com'])
-	->bcc([['email' => 'archive@example.com', 'name' => 'Archive']])
-	->replyTo('support@example.com')
-	->subject('Report')
-	->body('<p>Attached is your report.</p>', isHtml: true)
-	->attach('/path/to/report.pdf', 'report.pdf');
-
-$sent = $mailer->send();
-```
-
-A successful or failed `send()` resets the message's recipients, attachments, body, and template variables, so the App-scoped service can be reused for a subsequent message. SMTP keepalive, when enabled, concerns the connection, not reusing the previous message.
-
-### Simple templates
-
-`templateVars()` defines `{name}`-style replacements for subsequent body composition:
+### Addresses, bodies, and attachments
 
 ```php
-$sent = $this->app->mailer
-	->to('customer@example.com')
-	->subject('Welcome')
-	->templateVars(['name' => 'Customer'])
-	->body('<p>Hello {name}!</p>')
-	->send();
-```
-
-`setTemplate($fileOrString, $vars = [], $isFile = true, $isHtml = null)` can also load a readable file or process a literal template string:
-
-```php
-$mailer->setTemplate(
-	'<p>Hello {name}!</p>',
-	['name' => 'Customer'],
-	isFile: false,
-	isHtml: true
+$messageId = $this->app->mailer->send(
+	to: ['first@example.com', 'second@example.com' => 'Second Person'],
+	subject: 'Report',
+	html: '<p>Your <a href="https://example.com/reports/7">report</a> is attached.</p>',
+	cc: 'team@example.com',
+	bcc: ['archive@example.com'],
+	replyTo: 'support@example.com',
+	from: ['reports@example.com' => 'Reports'],
+	attachments: ['report.pdf' => '/path/to/report-7.pdf'],
 );
 ```
 
-This is **literal string substitution**, not CitOmni's general TemplateEngine. It performs no automatic HTML escaping. HTML-escape untrusted variables before inserting them into an HTML template; use plain-text-safe substitution for text messages.
+- An address argument is one address, or an array of addresses and `address => display name` pairs. An address that `to`, `cc`, and `bcc` name more than once, in any letter case or with its domain once in Unicode and once in punycode, receives one copy.
+- An internationalized domain goes out in punycode. Without `ext-intl` and `ext-mbstring`, `send()` refuses an address with a non-ASCII domain with `InvalidArgumentException`.
+- An address with UTF-8 in its local part needs PHPMailer 6.10 or later and a server that offers SMTPUTF8. Every address of that message is then checked with PHPMailer's `eai` validator instead of `php`, whatever their order.
+- One of `html` and `text` is required. With `html` alone, the plain-text alternative is generated: tags dropped together with the content of `head`, `title`, `style`, and `script`, links written as `text (URL)`. An HTML body without text, such as a single image, gets no alternative. Pass `text` to write it yourself.
+- `from` replaces `mail.from` for one message; with SMTP, it is also the envelope sender. `replyTo` replaces `mail.reply_to`; `replyTo: []` sends none.
+- `attachments` takes paths of readable files. A string key is the file name the recipient sees.
 
-### Transport setup and diagnostics
+Bodies go out as given. The mailer has no templating and no HTML escaping: render the body with `txt` or a template, and escape untrusted values for HTML before calling `send()`.
 
-Default transport is `smtp`, with port 587, authentication enabled, a 15-second SMTP timeout, and keepalive disabled. Set an SMTP host, username, sender, and `mail.smtp.password` secret for authenticated SMTP. TLS may be explicitly selected with `smtp.encryption = 'tls'` (STARTTLS) or `'ssl'`; the package does not assume that a port number alone chooses the encryption mode.
+### Refusals, partial delivery, and logging
 
-`mail.logging` controls operational diagnostics. Successful-mail logging is constrained to development and normally off. Error diagnostics may contain message metadata and, depending on environment and policy, content previews. **In development, a failed send records a short body preview even when `include_bodies` is false.** Treat mail logs as potentially sensitive. Avoid enabling `include_bodies` or SMTP transcripts without an explicit reason and access/retention controls.
+An SMTP server can accept a message for some recipients and refuse others. `send()` then throws `MailerSendException` with the accepted addresses in `$e->accepted`, spelled as in the arguments; sending the same message again would reach them twice.
 
-Use `getLastErrorMessage()` or `getLastErrorContext()` when `send()` returns `false`. Call `resetMessage()` to discard an unfinished composition; `refreshConfig()` reapplies service configuration when the host intentionally requires it.
+`$e->accepted` lists only what the server confirmed. When the connection fails or `mail.smtp.timeout` runs out before the server has answered the message data, the server may deliver the message although `$e->accepted` is empty. A workflow that retries automatically should allow for that duplicate.
+
+With `mail.log_errors` (on by default), every refused send writes a `mailer.error` line, and with `mail.log_success` every accepted send writes a `mailer.success` line, both to `mailer.jsonl` through the `log` service when the application has one. A line holds the Message-ID, transport, sender, recipients as sent (Bcc included), subject, and duration, and for a refusal the error and the accepted addresses. The Mailer adds no body and no credential, but addresses and subjects are personal data in many applications: restrict access to the log, or turn `mail.log_errors` off. Logging is best-effort: a log write that fails is dropped, so that it can neither hide a refusal nor turn an accepted send into an exception.
+
+The error in `$e->getMessage()` and in the log line quotes the server's reply as the server wrote it. The Mailer cannot vouch for that text: a content filter that quotes the message in its refusal puts that quote into the exception and the log.
+
+The bodies stay out of stack traces as well: `html` and `text` are `#[\SensitiveParameter]`, and exceptions raised while PHPMailer holds the message carry no arguments in their traces, because `zend.exception_ignore_args` is on for that span. A host that locks the setting off, with `php_admin_flag` for example, keeps the arguments, and PHPMailer's frames then show the message.
+
+### Transport setup
+
+The baseline transport is `smtp` on port 587 with **required** STARTTLS: a server that does not offer it fails the send instead of receiving credentials and messages in plain text. Choose `smtps` for implicit TLS, or `none` for a local relay without TLS. With `none`, everything crosses the connection in plain text, including the password when `mail.smtp.username` is set. An unknown transport or encryption value is rejected rather than replaced with a fallback.
+
+`mail.smtp.timeout` bounds connecting and each reply of the server; PHPMailer allows twice that for the reply to the message data. A server that stops answering fails the send after that time instead of PHPMailer's default of 300 seconds per reply. Raise it for a relay that takes long to accept a message, such as one that scans large attachments before it answers.
+
+The application must set `mail.from.email`, and for SMTP `mail.smtp.host`; until it does, using the service throws `MailerConfigException`. Set `mail.smtp.username` to authenticate. The password is read from the secret that `mail.smtp.password_secret` names, `mail.smtp.password` by default, and only when a message is sent.
+
+`mail.hostname` fixes the domain of the Message-ID header and the name in the SMTP greeting. When it is `''`, PHPMailer derives both itself: from the request's server name in HTTP, and from the machine name in CLI.
+
+The protected `newPhpMailer()` creates the PHPMailer instance for each message. A subclass, registered under the `mailer` service ID in the application's service map, can override it to add DKIM signing or SMTP stream options. Overriding the protected `htmlToText()` changes the generated plain-text part.
 
 ---
 
@@ -1061,31 +1060,42 @@ In addition to registry configuration, the service definition may supply options
 'mail' => [
 	'from' => ['email' => '', 'name' => ''],
 	'reply_to' => ['email' => '', 'name' => ''],
-	'format' => 'html',
+	'hostname' => '',
 	'transport' => 'smtp',
-	'sendmail_path' => '',
+	'sendmail_path' => '/usr/sbin/sendmail',
 	'smtp' => [
 		'host' => '',
 		'port' => 587,
-		'encryption' => null,
-		'auth' => true,
+		'encryption' => 'starttls',
 		'username' => '',
-		'auto_tls' => true,
+		'password_secret' => 'mail.smtp.password',
 		'timeout' => 15,
-		'keepalive' => false,
 	],
-	'logging' => [
-		'log_success' => false,
-		'debug_transcript' => false,
-		'max_lines' => 200,
-		'include_bodies' => false,
-	],
+	'log_errors' => true,
+	'log_success' => false,
 ],
 ```
 
-`mail.sendmail_path` applies to the sendmail and qmail transports; `''` uses `/usr/sbin/sendmail` or `/var/qmail/bin/sendmail`. `mail.smtp.auth` and `mail.smtp.auto_tls` must be booleans. SMTP host may be a semicolon-separated list understood by PHPMailer.
+| Key | Accepted values |
+|---|---|
+| `from.email` | A valid address; required. Write an internationalized domain in punycode. |
+| `reply_to.email` | `''` for none, or a valid address with an internationalized domain in punycode |
+| `hostname` | `''` to let PHPMailer choose, or a host name |
+| `transport` | `smtp`, `sendmail`, or `mail`; exact spelling |
+| `sendmail_path` | A sendmail-compatible binary; required for the `sendmail` transport |
+| `smtp.host` | A host name or IP address (IPv6 in brackets), or several separated by `;` and tried in order; required for the `smtp` transport. An entry may end in `:port`, which replaces `smtp.port` for that host. An `ssl://` or `tls://` prefix is refused, since `smtp.encryption` alone sets TLS. |
+| `smtp.port` | An integer from 1 to 65535 |
+| `smtp.encryption` | `starttls` (required STARTTLS), `smtps` (implicit TLS), or `none` |
+| `smtp.username` | `''` to send without authentication |
+| `smtp.password_secret` | The secrets key of the password, without leading or trailing whitespace |
+| `smtp.timeout` | Seconds that connecting and each reply of the server may take, twice that for the reply to the message data; an integer, at least 1 |
+| `log_errors`, `log_success` | Booleans; both write to `mailer.jsonl` |
 
-For authenticated SMTP, add the secret `mail.smtp.password` to the active app-local secret file. **Do not add that key to the `mail.smtp` config array.**
+`Mailer` checks every value once, when the service is created, and throws `MailerConfigException` naming the path of the first invalid one. Every key is checked, also the keys of a transport that is not in use; `smtp.host` and `sendmail_path` are required only by their own transport.
+
+Keys that the previous Mailer read are refused, whatever their value, with what replaces each in the message: `format` (`send()` takes `html` or `text`), `logging` (`log_errors` and `log_success`), `smtp.auth` (a non-empty `smtp.username` turns authentication on), `smtp.auto_tls` (`smtp.encryption` alone sets the TLS policy), `smtp.keepalive` (every message opens its own connection), and `smtp.password` (see below). The message names only the type of the value.
+
+For authenticated SMTP, add the secret that `smtp.password_secret` names to the active app-local secret file. **Do not put the password in the `mail` config.**
 
 ### Brute-force — `security.bruteforce`
 
@@ -1125,7 +1135,7 @@ Infrastructure errors represent different kinds of failures and should not all b
 | Secrets | `OutOfBoundsException`, `RuntimeException`, `UnexpectedValueException` | Provision/correct the secret source |
 | Text | `TxtConfigException`, `InvalidArgumentException`; missing entries fall back and log | Fix invalid configuration or language resources |
 | cURL | `CurlConfigException`, `CurlExecException` | Reject invalid requests or handle transport failure explicitly |
-| Mailer | `send()` returns `false` on PHPMailer send failure; other setup/secret errors can throw | Consult last error and decide whether to retry or queue |
+| Mailer | `MailerSendException` (with `accepted`), `MailerConfigException`, `MailerException`, `InvalidArgumentException` | Decide per refused send whether to retry or queue; fix configuration, the PHPMailer setup, or calling code otherwise |
 | Brute-force | `BruteForceConfigException`, `BruteForceSetupException`, input exceptions | Fix context or persistence installation |
 
 Do not wrap every infrastructure call in a broad `catch (\Throwable)` that silently produces a default result. Catch only where the owning layer has a real recovery path. The framework's global error handler should remain responsible for unexpected failures.
@@ -1140,7 +1150,7 @@ Some concerns are important precisely because the package exposes low-level capa
 - **Secret files must be private and environment-correct.** `has()` does not validate the business meaning of a secret; `get()` does not supply fallback credentials.
 - **Log content is caller-owned.** The logger does not automatically redact arbitrary data. Sanitize or omit sensitive fields before writing.
 - **cURL redaction is explicit and scoped.** `sensitive_query_keys` is helpful for diagnostics but does not replace secure URL handling or authorization-header discipline.
-- **Mailer templates do not HTML-escape.** Escape in the calling workflow according to the target context.
+- **The mailer sends bodies as given.** Escape untrusted values for HTML in the calling workflow before they reach `send()`.
 - **Brute-force counters need controlled schema management.** The provided SQL dump is destructive if reapplied.
 - **HTTP status and transport success are different.** An HTTP 429/500 response can be a successfully completed cURL request.
 - **Configured services are not permission checks.** An application Operation or Policy still decides who can execute a protected action.
@@ -1159,6 +1169,7 @@ The package favors predictable contracts and low work on normal application path
 - `Txt` caches loaded PHP language files per service instance.
 - `Curl` may reuse its cURL connection/DNS state within one process.
 - `Log` writes append-only records and isolates contention with per-file locks.
+- `Mailer` builds every message on a new PHPMailer instance from its arguments and cfg, and restores the address validator that PHPMailer switches for the whole process, so no message depends on the ones before it.
 - `BruteForce` uses bounded counter rows rather than an ever-growing history of individual attempts.
 
 External effects—database server behavior, filesystem permissions, SMTP delivery, TLS behavior, and network latency—are not deterministic. The package promises explicit policies and failures, not identical response times or successful delivery from unreliable dependencies.
@@ -1175,7 +1186,7 @@ This package is intentionally smaller than an all-purpose infrastructure framewo
 - `Txt` has no automatic language fallback chain and no HTML escaping.
 - The `Txt` diagnostic file name is fixed to `txt.jsonl`.
 - `Curl` has no automatic JSON body handling, retries, or SSRF protection for user-supplied URLs.
-- `Mailer` templates use simple token replacement, not the CitOmni TemplateEngine.
+- `Mailer` has no templating, no inline images, and no per-message custom headers, and it opens a new SMTP connection for every message. Its log file name is fixed to `mailer.jsonl`.
 - `BruteForce` requires a separately installed table and application-owned maintenance scheduling.
 - `formatNumber` is a compatibility service marked deprecated by the registry.
 
@@ -1231,6 +1242,7 @@ src/
 │   ├── Curl*.php
 │   ├── Db*.php
 │   ├── Log*.php
+│   ├── Mailer*.php
 │   ├── TxtConfigException.php
 │   └── Value*.php
 ├── Model/
