@@ -1,6 +1,6 @@
 {
 	"name": "citomni/infrastructure",
-	"description": "Lean, cross-mode infrastructure for CitOmni apps: DB, logging, text/i18n, mail, cURL, and brute-force protection.",
+	"description": "Lean, cross-mode infrastructure for CitOmni apps: DB, logging, text/i18n, mail, cURL, brute-force protection, and URL slugs.",
 	"type": "library",
 	"license": "MIT",
 	"homepage": "https://github.com/citomni/infrastructure",

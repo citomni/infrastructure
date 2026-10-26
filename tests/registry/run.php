@@ -73,7 +73,7 @@ foreach ([
 	'Exception/DbException', 'Exception/DbConnectException', 'Exception/DbQueryException',
 	'Exception/LogException', 'Exception/LogConfigException', 'Exception/LogDirectoryException',
 	'Exception/LogFileException', 'Exception/LogRotationException', 'Exception/LogWriteException',
-	'Exception/TxtConfigException',
+	'Exception/SluggerConfigException', 'Exception/TxtConfigException',
 	'Exception/ValueConfigurationException', 'Exception/ValueDefinitionException',
 	'Exception/ValueFromSqlException', 'Exception/ValueToSqlException',
 	'Repository/BruteForceRepository', 'Repository/DatabaseSchemaRepository',
@@ -371,6 +371,10 @@ $checks = [
 
 	'formatNumber constructs from the shipped cfg baseline' => static function (): void {
 		constructFromBaseline('formatNumber');
+	},
+
+	'slugger constructs from the shipped cfg baseline' => static function (): void {
+		same('aeroe-oel', constructFromBaseline('slugger')->slugify("\u{C6}r\u{F8} \u{D8}l"), 'slug of the shipped policy');
 	},
 
 	// No CitOmni baseline declares locale.language; the application supplies it.

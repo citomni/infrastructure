@@ -43,6 +43,7 @@ class Registry {
 		'valueToSql'	=> \CitOmni\Infrastructure\Service\ValueToSql::class,
 		'valueFromSql'	=> \CitOmni\Infrastructure\Service\ValueFromSql::class,
 		'bruteForce'	=> \CitOmni\Infrastructure\Service\BruteForce::class,
+		'slugger'		=> \CitOmni\Infrastructure\Service\Slugger::class,
 
 		// Deprecated and to be removed; see FormatNumber.
 		'formatNumber' => \CitOmni\Infrastructure\Service\FormatNumber::class,
@@ -123,6 +124,17 @@ class Registry {
 
 			'log_errors'  => true,  // Log sends that the transport refused, to mailer.jsonl.
 			'log_success' => false, // Log sends that the transport accepted, to mailer.jsonl.
+		],
+
+
+		// Slug policy. Service map options of the slugger service override each key.
+		'slug' => [
+			'separator'          => '-',               // Text that replaces disallowed characters and joins words; not empty, and without characters that disallowed_pattern matches.
+			'lowercase'          => true,              // Lowercase ASCII letters; validate() then rejects ASCII uppercase.
+			'max_length'         => 140,               // Maximum slug length in bytes, >= 1; slugify() shortens longer slugs, validate() rejects them.
+			'transliterate'      => true,              // Let slugify() replace letters such as the Danish and German letters and accented Latin letters with ASCII first.
+			'reserved'           => [],                // Slugs that validate() rejects, as a list of strings compared without the case of ASCII letters.
+			'disallowed_pattern' => '/[^a-z0-9\-]+/i', // PCRE that matches the characters that slugify() and normalize() replace with the separator and validate() rejects; must not match the empty string.
 		],
 
 

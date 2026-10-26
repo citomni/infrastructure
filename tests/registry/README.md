@@ -11,7 +11,7 @@ php tests/registry/run.php
 Expected result:
 
 ```
-17 passed, 0 failed
+18 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -45,6 +45,7 @@ All checks pin existing behavior.
 | valueToSql and valueFromSql accept the shipped locale.format policy | `locale.format` baseline |
 | bruteForce constructs from the shipped cfg baseline with a valid default context | `security.bruteforce.default` |
 | formatNumber constructs from the shipped cfg baseline | `formatNumber` |
+| slugger constructs from the shipped cfg baseline | `slug` baseline; one slug of the shipped policy |
 | txt constructs from the shipped cfg baseline plus locale.language | `txt` |
 | shipped language files return flat maps of non-empty strings | `language/*/*.php` |
 | the cfg scan finds known reads in src/ | The scan itself, so a change in the code style cannot make it pass blind |

@@ -1,6 +1,6 @@
 # CitOmni Infrastructure
 
-Lean, shared infrastructure services for CitOmni HTTP and CLI applications: database access, input/output normalization, JSONL logging, application secrets, language files, outbound HTTP requests, email, and brute-force protection.
+Lean, shared infrastructure services for CitOmni HTTP and CLI applications: database access, input/output normalization, JSONL logging, application secrets, language files, outbound HTTP requests, email, brute-force protection, and URL slugs.
 
 `citomni/infrastructure` supplies the practical building blocks that almost every application needs, without embedding them in a particular controller, command, or business workflow. The package contributes a service map and configuration defaults to `citomni/kernel`. Services are resolved lazily through the application and reused within the same `App` instance.
 
@@ -12,7 +12,7 @@ This is an **infrastructure package**, not an application framework, ORM, authen
 
 ## Highlights
 
-- **One provider for both HTTP and CLI**, with the same ten registered service IDs.
+- **One provider for both HTTP and CLI**, with the same eleven registered service IDs.
 - **Lazy App services** through `$this->app->db`, `$this->app->log`, `$this->app->curl`, and their peers.
 - **Native MySQLi database access** with positional bindings, convenience CRUD operations, transactions, and a bounded prepared-statement cache.
 - **Explicit value conversion in both directions** between localized form input, SQL values, and display-ready values.
@@ -22,6 +22,7 @@ This is an **infrastructure package**, not an application framework, ORM, authen
 - **Outbound HTTP via cURL**, with a normalized response contract, optional connection reuse, and explicit redaction of selected query parameters.
 - **Email delivery** through PHPMailer: one stateless call per message, with required STARTTLS by default, SMTP secrets, attachments, a generated plain-text part, and metadata-only logging.
 - **Database-backed brute-force protection** for identifiers and IP addresses, with independently configured contexts and bounded counters.
+- **Deterministic URL slugs**: one policy for making, checking, and deduplicating slugs, with a fixed transliteration that gives the same slug on every server.
 - **Clear failure semantics**: invalid configuration and unavailable infrastructure fail visibly instead of silently switching strategies.
 - **No transport coupling**: the same services work in an HTTP controller, an application operation, a registered service, or a CLI command.
 
@@ -59,9 +60,10 @@ It does not decide which SQL tables represent a domain, which event warrants an 
 | `curl` | `Curl` | Execute outbound HTTP requests |
 | `mailer` | `Mailer` | Compose and send email through PHPMailer |
 | `bruteForce` | `BruteForce` | Persist and evaluate failed-attempt counters |
+| `slugger` | `Slugger` | Make, check, and deduplicate URL slugs |
 | `formatNumber` | `FormatNumber` | Deprecated decimal conversion compatibility service |
 
-All ten IDs are registered in both the HTTP and CLI maps. `formatNumber` remains available for existing consumers, but new code should use `valueToSql` and `valueFromSql`.
+All eleven IDs are registered in both the HTTP and CLI maps. `formatNumber` remains available for existing consumers, but new code should use `valueToSql` and `valueFromSql`.
 
 ---
 
@@ -77,6 +79,7 @@ The package owns its technical service contracts and their shared mechanics:
 - cURL request construction, response normalization, and transport diagnostics.
 - PHPMailer integration, SMTP configuration, and mail diagnostics.
 - Brute-force counter rules and persistence through its own repositories.
+- The slug policy and its transliteration.
 - Infrastructure-specific exceptions and a bounded transaction-isolation enum.
 
 The package's provider contributes services and configuration, **not routes, controllers, commands, or templates**.
@@ -264,6 +267,7 @@ The service map is the intended entry point. These are the primary methods curre
 | `curl` | `execute()` |
 | `mailer` | `send()` |
 | `bruteForce` | `assertStorageReady()`, `status()`, `record()`, `clear()`, `prune()` |
+| `slugger` | `slugify()`, `normalize()`, `validate()`, `enforceLength()`, `isReserved()`, `ensureUnique()` |
 | `formatNumber` | `toDb()`, `fromDb()` — deprecated |
 
 The following sections explain parameters, result shapes, configuration, and failure behavior that matter to consumers.
@@ -710,6 +714,38 @@ Translation values are plain strings, not pre-escaped HTML. Escape them appropri
 
 ---
 
+## URL slugs
+
+`$this->app->slugger` gives every caller the same slug policy: what a slug may contain, how long it may be, and which slugs are reserved. Whether a slug is taken belongs to the caller, which answers through a callback.
+
+```php
+$base = $this->app->slugger->slugify($title);
+$slug = $this->app->slugger->ensureUnique(
+	fn(string $candidate): bool => $repository->slugExists($candidate),
+	$base
+);
+```
+
+- `slugify()` transliterates letters to ASCII while `slug.transliterate` is on, replaces each run of disallowed characters with the separator, collapses and trims separators, lowercases ASCII letters and shortens the result to `slug.max_length` bytes. It does not check the reserved slugs.
+- `normalize()` does the same without transliterating or shortening, for comparing a slug that someone typed.
+- `validate()` throws `\InvalidArgumentException` for a slug that breaks the policy, also for a reserved one.
+- `ensureUnique()` tries the base and then `base-2`, `base-3` and so on, and asks the callback about each. The check and the caller's later write are not atomic; a unique key in storage decides under concurrent writers.
+- `enforceLength()` shortens at a separator when one lies in the last 40 percent, and never cuts inside a UTF-8 character.
+
+The transliteration is a fixed map in the class, so a text gives the same slug on every server, whatever the locale, the platform and the installed extensions. The Danish letters become `ae`, `oe` and `aa`, the German umlauts `ae`, `oe` and `ue`, and `ß` becomes `ss`. The other letters of the Latin-1 Supplement and Latin Extended-A lose their accents, also in decomposed form. Every other character is left to `slug.disallowed_pattern`, which by default replaces it with the separator. `"Ærø Øl, løbesko & Ålborg"` becomes `aeroe-oel-loebesko-aalborg`.
+
+### Moving from the slugger of citomni/http
+
+Until now, the `slugger` service came from citomni/http, in the HTTP mode only, with its policy in `http.slug`. This package now registers `slugger` in both modes, and its policy is the `slug` node. When infrastructure is listed in `config/providers.php`, its `slugger` replaces the one of citomni/http, whose release without the service follows.
+
+- The public methods keep their names, parameters and results. Code that calls `$this->app->slugger` needs no change.
+- Move an override of `http.slug` to `slug`, and rename `maxLength` to `max_length` and `allowedPattern` to `disallowed_pattern`; the same goes for options in a service map entry. The keys of `http.slug` have no effect anymore.
+- Transliteration no longer goes through iconv, whose result depended on the process locale: `"Ærø"` became `aer` under `LC_CTYPE=C` and `aero` under `C.UTF-8`. New slugs follow the map above. Stored slugs do not change.
+- A slug policy value that is not valid throws `SluggerConfigException` with the cfg path, where the previous slugger ignored some values: a non-bool `lowercase` or `transliterate`, a reserved slug that is not a non-empty string, a pattern that does not compile or matches the empty string, and a separator that the pattern matches.
+- A numeric reserved slug, such as `404`, is now reserved; a separator of several characters is collapsed and trimmed as a whole; `enforceLength()` no longer cuts inside a UTF-8 character; and a pattern with the `u` modifier makes `slugify()`, `normalize()` and `validate()` throw `\InvalidArgumentException` for text that is not valid UTF-8 instead of returning `''` or accepting it.
+
+---
+
 ## Outbound HTTP with cURL
 
 `$this->app->curl->execute()` accepts one explicit request array and returns a normalized array for both successful and unsuccessful HTTP status codes.
@@ -973,7 +1009,7 @@ The provider's `CFG_COMMON` supplies the baseline nodes for both HTTP and CLI. T
 
 The examples below document **recognized settings** and actual defaults; they are not a request to duplicate the entire registry into each application's config.
 
-`Db`, `Log`, `Curl`, `Mailer`, `ValueToSql` and `ValueFromSql` read the `db`, `log`, `curl`, `mail` and `locale.format` keys directly, without fallbacks in code, so the baseline is the only source of those defaults. A node that an application overrides with an empty array, which replaces it in the merge, or a compiled config from a version of the package that did not ship a key yet, makes the first read throw `\OutOfBoundsException`. Rebuild the compiled config after updating the package: `php bin/citomni cache:warm` from citomni/cli rebuilds both modes; without citomni/cli, call the signed `/_system/reset-cache` or `/_system/warmup-cache` webhook from citomni/http.
+`Db`, `Log`, `Curl`, `Mailer`, `Slugger`, `ValueToSql` and `ValueFromSql` read the `db`, `log`, `curl`, `mail`, `slug` and `locale.format` keys directly, without fallbacks in code, so the baseline is the only source of those defaults. A node that an application overrides with an empty array, which replaces it in the merge, or a compiled config from a version of the package that did not ship a key yet, makes the first read throw `\OutOfBoundsException`. Rebuild the compiled config after updating the package: `php bin/citomni cache:warm` from citomni/cli rebuilds both modes; without citomni/cli, call the signed `/_system/reset-cache` or `/_system/warmup-cache` webhook from citomni/http.
 
 ### Database — `db`
 
@@ -1097,6 +1133,19 @@ Keys that the previous Mailer read are refused, whatever their value, with what 
 
 For authenticated SMTP, add the secret that `smtp.password_secret` names to the active app-local secret file. **Do not put the password in the `mail` config.**
 
+### Slugs — `slug`
+
+| Key | Default | Meaning |
+|---|---|---|
+| `separator` | `-` | Replaces disallowed characters and joins the number in `ensureUnique()`; not empty, and without characters that `disallowed_pattern` matches |
+| `lowercase` | `true` | Lowercase ASCII letters; `validate()` then rejects ASCII uppercase |
+| `max_length` | `140` | Maximum slug length in bytes, at least 1 |
+| `transliterate` | `true` | Let `slugify()` transliterate letters to ASCII first |
+| `reserved` | `[]` | List of slugs that `validate()` rejects, compared without the case of ASCII letters |
+| `disallowed_pattern` | `/[^a-z0-9\-]+/i` | PCRE that matches the characters to replace or reject; must compile and must not match the empty string |
+
+A service map entry for `slugger` may set the same keys as options, which win over cfg.
+
 ### Brute-force — `security.bruteforce`
 
 The registry provides a `default` context:
@@ -1137,6 +1186,7 @@ Infrastructure errors represent different kinds of failures and should not all b
 | cURL | `CurlConfigException`, `CurlExecException` | Reject invalid requests or handle transport failure explicitly |
 | Mailer | `MailerSendException` (with `accepted`), `MailerConfigException`, `MailerException`, `InvalidArgumentException` | Decide per refused send whether to retry or queue; fix configuration, the PHPMailer setup, or calling code otherwise |
 | Brute-force | `BruteForceConfigException`, `BruteForceSetupException`, input exceptions | Fix context or persistence installation |
+| Slugs | `SluggerConfigException`; `InvalidArgumentException` from `validate()` and `ensureUnique()` | Fix the slug policy; answer a rejected or taken slug in the adapter |
 
 Do not wrap every infrastructure call in a broad `catch (\Throwable)` that silently produces a default result. Catch only where the owning layer has a real recovery path. The framework's global error handler should remain responsible for unexpected failures.
 
@@ -1171,6 +1221,7 @@ The package favors predictable contracts and low work on normal application path
 - `Log` writes append-only records and isolates contention with per-file locks.
 - `Mailer` builds every message on a new PHPMailer instance from its arguments and cfg, and restores the address validator that PHPMailer switches for the whole process, so no message depends on the ones before it.
 - `BruteForce` uses bounded counter rows rather than an ever-growing history of individual attempts.
+- `Slugger` transliterates with a fixed map rather than iconv, so a text gives the same slug on every server, whatever its locale and extensions.
 
 External effects—database server behavior, filesystem permissions, SMTP delivery, TLS behavior, and network latency—are not deterministic. The package promises explicit policies and failures, not identical response times or successful delivery from unreliable dependencies.
 
@@ -1213,6 +1264,7 @@ php tests/log/run.php
 php tests/txt/run.php
 php tests/curl/run.php
 php tests/mailer/run.php
+php tests/slugger/run.php
 php tests/value-to-sql/run.php
 php tests/value-from-sql/run.php
 php tests/db/database.php
@@ -1221,7 +1273,7 @@ php tests/brute-force/database.php
 
 The database suites require a reachable **test** database server and suitable permissions. The test harness uses `CITOMNI_TEST_PASSWORD` for its database connection and `CITOMNI_TEST_PARALLEL=1` where parallel worker coverage is desired. These tests exercise database creation and cleanup; **never point them at a production database**.
 
-The suites cover behavior such as provider maps, secret validation, JSONL locking/rotation, translation resolution, cURL request and redaction semantics, mail transport behavior, value normalization, database transactions, and brute-force concurrency.
+The suites cover behavior such as provider maps, secret validation, JSONL locking/rotation, translation resolution, cURL request and redaction semantics, mail transport behavior, the slug contract, value normalization, database transactions, and brute-force concurrency.
 
 There is currently **no `composer test` script** declared in this package's `composer.json`; invoke the test runner explicitly.
 
@@ -1243,6 +1295,7 @@ src/
 │   ├── Db*.php
 │   ├── Log*.php
 │   ├── Mailer*.php
+│   ├── SluggerConfigException.php
 │   ├── TxtConfigException.php
 │   └── Value*.php
 ├── Model/
@@ -1258,6 +1311,7 @@ src/
     ├── Log.php
     ├── Mailer.php
     ├── Secrets.php
+    ├── Slugger.php
     ├── Txt.php
     ├── ValueFromSql.php
     └── ValueToSql.php
