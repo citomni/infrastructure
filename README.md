@@ -1009,7 +1009,7 @@ The provider's `CFG_COMMON` supplies the baseline nodes for both HTTP and CLI. T
 
 The examples below document **recognized settings** and actual defaults; they are not a request to duplicate the entire registry into each application's config.
 
-`Db`, `Log`, `Curl`, `Mailer`, `Slugger`, `ValueToSql` and `ValueFromSql` read the `db`, `log`, `curl`, `mail`, `slug` and `locale.format` keys directly, without fallbacks in code, so the baseline is the only source of those defaults. A node that an application overrides with an empty array, which replaces it in the merge, or a compiled config from a version of the package that did not ship a key yet, makes the first read throw `\OutOfBoundsException`. Rebuild the compiled config after updating the package: `php bin/citomni cache:warm` from citomni/cli rebuilds both modes; without citomni/cli, call the signed `/_system/reset-cache` or `/_system/warmup-cache` webhook from citomni/http.
+`Db`, `Log`, `Curl`, `Mailer`, `Slugger`, `ValueToSql` and `ValueFromSql` read the `db`, `log`, `curl`, `mail`, `slug` and `locale.format` keys directly, without fallbacks in code, so the baseline is the only source of those defaults. A compiled config from a version of the package that did not ship a key yet makes the first read throw `\OutOfBoundsException`. Rebuild the compiled config after updating the package: `php bin/citomni cache:warm` from citomni/cli rebuilds both modes; without citomni/cli, call the signed `/_system/reset-cache` or `/_system/warmup-cache` webhook from citomni/http.
 
 ### Database — `db`
 

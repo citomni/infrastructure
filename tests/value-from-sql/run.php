@@ -71,9 +71,7 @@ require __DIR__ . '/../../src/Service/ValueFromSql.php';
 
 /** A ValueFromSql service on the shipped locale.format baseline with $format overrides. */
 function service(array $format = []): ValueFromSql {
-	// An empty override would replace the whole node, as in the kernel merge.
-	$cfg = $format === [] ? Registry::CFG_COMMON : mergeLastWins(Registry::CFG_COMMON, ['locale' => ['format' => $format]]);
-	return new ValueFromSql(new App($cfg));
+	return new ValueFromSql(new App(mergeLastWins(Registry::CFG_COMMON, ['locale' => ['format' => $format]])));
 }
 
 

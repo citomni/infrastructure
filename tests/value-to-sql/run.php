@@ -70,9 +70,7 @@ require __DIR__ . '/../../src/Service/ValueToSql.php';
 
 /** A ValueToSql service on the shipped locale.format baseline with $format overrides. */
 function service(array $format = []): ValueToSql {
-	// An empty override would replace the whole node, as in the kernel merge.
-	$cfg = $format === [] ? Registry::CFG_COMMON : mergeLastWins(Registry::CFG_COMMON, ['locale' => ['format' => $format]]);
-	return new ValueToSql(new App($cfg));
+	return new ValueToSql(new App(mergeLastWins(Registry::CFG_COMMON, ['locale' => ['format' => $format]])));
 }
 
 

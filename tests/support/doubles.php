@@ -34,8 +34,8 @@ declare(strict_types=1);
  * - MemorySecrets stands in for the secrets service. It serves secrets from memory,
  *   so a password from CITOMNI_TEST_PASSWORD never touches the disk.
  * - mergeLastWins() layers cfg overrides on the package baseline the way the kernel
- *   merges cfg: associative arrays merge deeply, lists and scalars are replaced,
- *   and so is a node overridden with an empty array.
+ *   merges cfg: associative arrays merge deeply, an empty array leaves an
+ *   associative array unchanged, and lists and scalars are replaced.
  */
 
 namespace CitOmni\Kernel {
@@ -192,14 +192,15 @@ namespace CitOmni\Infrastructure\Tests\Support {
 
 
 	/**
-	 * Layer a cfg override on a baseline: associative arrays merge deeply, lists and
-	 * scalars are replaced, as in CitOmni\Kernel\Arr::mergeAssocLastWins().
+	 * Layer a cfg override on a baseline: associative arrays merge deeply, an empty array
+	 * leaves an associative array unchanged, and lists and scalars are replaced, as in
+	 * CitOmni\Kernel\Arr::mergeAssocLastWins().
 	 */
 	function mergeLastWins(array $base, array $override): array {
 		foreach ($override as $key => $value) {
 			if (
 				\is_string($key)
-				&& \is_array($value) && !\array_is_list($value)
+				&& \is_array($value) && ($value === [] || !\array_is_list($value))
 				&& \is_array($base[$key] ?? null) && !\array_is_list($base[$key])
 			) {
 				$base[$key] = mergeLastWins($base[$key], $value);
