@@ -20,7 +20,7 @@ This is an **infrastructure package**, not an application framework, ORM, authen
 - **Environment-specific application secrets**, resolved lazily from app-local PHP files and never placed in normal configuration.
 - **PHP language-file lookup** for application and Composer-package translations, with deterministic `%PLACEHOLDER%` replacement.
 - **Outbound HTTP via cURL**, with a normalized response contract, optional connection reuse, and explicit redaction of selected query parameters.
-- **Email delivery** through PHPMailer: one stateless call per message, with required STARTTLS by default, SMTP secrets, attachments, a generated plain-text part, and metadata-only logging.
+- **Email delivery** through PHPMailer: one stateless call per message, with named sender profiles that each bring their own transport, required STARTTLS by default, SMTP secrets, attachments, a generated plain-text part, and metadata-only logging.
 - **Database-backed brute-force protection** for identifiers and IP addresses, with independently configured contexts and bounded counters.
 - **Deterministic URL slugs**: one policy for making, checking, and deduplicating slugs, with a fixed transliteration that gives the same slug on every server.
 - **Clear failure semantics**: invalid configuration and unavailable infrastructure fail visibly instead of silently switching strategies.
@@ -860,7 +860,7 @@ try {
 
 | Exception | When | Was anything sent? |
 |---|---|---|
-| `InvalidArgumentException` | No recipient or body, `from` naming other than one address, a non-string entry, an internationalized domain that punycode cannot express, or an address or attachment that PHPMailer rejects | No |
+| `InvalidArgumentException` | An unknown `profile`, no recipient or body, `from` naming other than one address, a non-string entry, an internationalized domain that punycode cannot express, or an address or attachment that PHPMailer rejects | No |
 | `MailerException` | PHPMailer cannot build the message from valid arguments, such as when signing set up in a `newPhpMailer()` override fails | No |
 | `MailerSendException` | The transport did not confirm the message for every recipient: connection, TLS, authentication, a refused sender or recipient, or no answer in time | `$e->accepted` lists the recipients it confirmed; see below |
 | `OutOfBoundsException` and the other `Secrets` exceptions | The SMTP password secret is missing or unreadable | No |
@@ -885,7 +885,7 @@ $messageId = $this->app->mailer->send(
 - An internationalized domain goes out in punycode. Without `ext-intl` and `ext-mbstring`, `send()` refuses an address with a non-ASCII domain with `InvalidArgumentException`.
 - An address with UTF-8 in its local part needs PHPMailer 6.10 or later and a server that offers SMTPUTF8. Every address of that message is then checked with PHPMailer's `eai` validator instead of `php`, whatever their order.
 - One of `html` and `text` is required. With `html` alone, the plain-text alternative is generated: tags dropped together with the content of `head`, `title`, `style`, and `script`, links written as `text (URL)`. An HTML body without text, such as a single image, gets no alternative. Pass `text` to write it yourself.
-- `from` replaces `mail.from` for one message; with SMTP, it is also the envelope sender. `replyTo` replaces `mail.reply_to`; `replyTo: []` sends none.
+- `from` replaces `mail.from`, or the `from` of the message's profile, for one message; with SMTP, it is also the envelope sender. `replyTo` replaces `mail.reply_to` or the profile's `reply_to`; `replyTo: []` sends none. Neither changes the transport or its login.
 - `attachments` takes paths of readable files. A string key is the file name the recipient sees.
 
 Bodies go out as given. The mailer has no templating and no HTML escaping: render the body with `txt` or a template, and escape untrusted values for HTML before calling `send()`.
@@ -896,7 +896,7 @@ An SMTP server can accept a message for some recipients and refuse others. `send
 
 `$e->accepted` lists only what the server confirmed. When the connection fails or `mail.smtp.timeout` runs out before the server has answered the message data, the server may deliver the message although `$e->accepted` is empty. A workflow that retries automatically should allow for that duplicate.
 
-With `mail.log_errors` (on by default), every refused send writes a `mailer.error` line, and with `mail.log_success` every accepted send writes a `mailer.success` line, both to `mailer.jsonl` through the `log` service when the application has one. A line holds the Message-ID, transport, sender, recipients as sent (Bcc included), subject, and duration, and for a refusal the error and the accepted addresses. The Mailer adds no body and no credential, but addresses and subjects are personal data in many applications: restrict access to the log, or turn `mail.log_errors` off. Logging is best-effort: a log write that fails is dropped, so that it can neither hide a refusal nor turn an accepted send into an exception.
+With `mail.log_errors` (on by default), every refused send writes a `mailer.error` line, and with `mail.log_success` every accepted send writes a `mailer.success` line, both to `mailer.jsonl` through the `log` service when the application has one. A line holds the Message-ID, profile (`null` without one), transport, sender, recipients as sent (Bcc included), subject, and duration, and for a refusal the error and the accepted addresses. The Mailer adds no body and no credential, but addresses and subjects are personal data in many applications: restrict access to the log, or turn `mail.log_errors` off. Logging is best-effort: a log write that fails is dropped, so that it can neither hide a refusal nor turn an accepted send into an exception.
 
 The error in `$e->getMessage()` and in the log line quotes the server's reply as the server wrote it. The Mailer cannot vouch for that text: a content filter that quotes the message in its refusal puts that quote into the exception and the log.
 
@@ -912,7 +912,48 @@ The application must set `mail.from.email`, and for SMTP `mail.smtp.host`; until
 
 `mail.hostname` fixes the domain of the Message-ID header and the name in the SMTP greeting. When it is `''`, PHPMailer derives both itself: from the request's server name in HTTP, and from the machine name in CLI.
 
-The protected `newPhpMailer()` creates the PHPMailer instance for each message. A subclass, registered under the `mailer` service ID in the application's service map, can override it to add DKIM signing or SMTP stream options. Overriding the protected `htmlToText()` changes the generated plain-text part.
+The protected `newPhpMailer(?string $profile)` creates the PHPMailer instance for each message, with the transport of the message's profile, or of `mail` when `$profile` is `null`. A subclass, registered under the `mailer` service ID in the application's service map, can override it to add DKIM signing, with a key per profile if needed, or SMTP stream options. The override must pass `$profile` on to `parent::newPhpMailer()`, so that the instance gets the profile's transport and login. An override written before profiles existed declares `newPhpMailer()` without the parameter, which PHP refuses with a fatal error; add `?string $profile` and pass it on. Overriding the protected `htmlToText()` changes the generated plain-text part.
+
+### Sender profiles
+
+One application can send from several senders, each with its own transport and login, such as mailboxes whose SMTP account must match the sender address. Define each sender as a profile under `mail.profiles`, and name it in `send()`:
+
+```php
+'mail' => [
+	'from' => ['email' => 'contact@example.com', 'name' => 'Example'],
+	'smtp' => ['host' => 'smtp.example.com', 'username' => 'contact@example.com'],
+
+	'profiles' => [
+		'billing' => [
+			'from'     => ['email' => 'billing@example.com', 'name' => 'Example Billing'],
+			'reply_to' => ['email' => 'accounts@example.com', 'name' => ''],
+			'smtp'     => [
+				'host'            => 'smtp.other-provider.example',
+				'port'            => 587,
+				'encryption'      => 'starttls',
+				'username'        => 'billing@example.com',
+				'password_secret' => 'mail.profiles.billing.smtp.password',
+				'timeout'         => 15,
+			],
+		],
+		'notices' => [
+			'from' => ['email' => 'notices@example.com', 'name' => 'Example Notices'],
+		],
+	],
+],
+```
+
+```php
+$this->app->mailer->send(to: $email, subject: 'Your invoice', html: $html, profile: 'billing');
+```
+
+- A profile holds any of `from`, `reply_to`, `hostname`, `transport`, `sendmail_path`, and `smtp`. Each key it holds replaces that key of `mail` whole, and the keys it leaves out come from `mail`: `notices` above sends through `mail.smtp` with its own sender and the Reply-To of `mail`.
+- A profile's `from`, `reply_to`, and `smtp` hold every key of their node. A profile with an SMTP host of its own therefore always names its own `username` and `password_secret` too, so the login of `mail.smtp` never goes to another host.
+- A profile holds `smtp` only for the `smtp` transport and `sendmail_path` only for `sendmail`, whether it sets `transport` itself or takes it from `mail`.
+- Without `profile`, or with `profile: null`, `send()` uses `mail` itself. Profile names are case-sensitive, and an unknown name throws `InvalidArgumentException` before anything is read or sent.
+- Every profile is checked when the service is created, like `mail` itself; `MailerConfigException` names the path of the first invalid value. A value that a profile takes from `mail`, such as `mail.smtp.host` for a profile that switches to the `smtp` transport, is reported under its `mail` path.
+
+Keep each environment's transport in that environment's cfg file, as for `mail.smtp`: put a profile's sender in `config/citomni_cfg.php` and its `smtp` in `config/citomni_cfg.prod.php`. A profile without its own `smtp` follows `mail.smtp`, so a development overlay that points `mail.smtp` at a local mail catcher catches that profile too. A profile with its own `smtp` in the shared cfg file needs its own entry in that overlay, or development sends through its real server.
 
 ---
 
@@ -1107,6 +1148,7 @@ In addition to registry configuration, the service definition may supply options
 		'password_secret' => 'mail.smtp.password',
 		'timeout' => 15,
 	],
+	'profiles' => [],
 	'log_errors' => true,
 	'log_success' => false,
 ],
@@ -1125,9 +1167,10 @@ In addition to registry configuration, the service definition may supply options
 | `smtp.username` | `''` to send without authentication |
 | `smtp.password_secret` | The secrets key of the password, without leading or trailing whitespace |
 | `smtp.timeout` | Seconds that connecting and each reply of the server may take, twice that for the reply to the message data; an integer, at least 1 |
+| `profiles` | Senders by name, each a map with any of `from`, `reply_to`, `hostname`, `transport`, `sendmail_path`, and `smtp`, accepting the same values; `[]` for none. See [Sender profiles](#sender-profiles) |
 | `log_errors`, `log_success` | Booleans; both write to `mailer.jsonl` |
 
-`Mailer` checks every value once, when the service is created, and throws `MailerConfigException` naming the path of the first invalid one. Every key is checked, also the keys of a transport that is not in use; `smtp.host` and `sendmail_path` are required only by their own transport.
+`Mailer` checks every value once, when the service is created, and throws `MailerConfigException` naming the path of the first invalid one. Every key is checked, also the keys of a transport that is not in use; `smtp.host` and `sendmail_path` are required only by their own transport. Every profile is checked the same way, with the additional rules under [Sender profiles](#sender-profiles).
 
 Keys that the previous Mailer read are refused, whatever their value, with what replaces each in the message: `format` (`send()` takes `html` or `text`), `logging` (`log_errors` and `log_success`), `smtp.auth` (a non-empty `smtp.username` turns authentication on), `smtp.auto_tls` (`smtp.encryption` alone sets the TLS policy), `smtp.keepalive` (every message opens its own connection), and `smtp.password` (see below). The message names only the type of the value.
 

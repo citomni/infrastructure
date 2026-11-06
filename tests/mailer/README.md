@@ -11,7 +11,7 @@ php tests/mailer/run.php
 Expected result:
 
 ```
-29 passed, 0 failed
+34 passed, 0 failed
 ```
 
 `PASS` lines go to stdout, `FAIL` lines to stderr. The last line holds the totals, and the exit code is 1 when a check fails.
@@ -24,7 +24,7 @@ Without `ext-intl` and `ext-mbstring`, PHPMailer cannot send to an international
 
 ## How it works
 
-The real Mailer runs on the kernel doubles in `tests/support/doubles.php`, with `CITOMNI_ENVIRONMENT` set to `prod`, a recording double as the log service, and an in-memory secrets double. Its cfg is the shipped `mail` baseline from `Registry::CFG_COMMON` with a sender, a Reply-To address and a host name added, pointed at `smtp-server.php` on a free local port with encryption `none`. A small subclass, `InspectableMailer`, exposes the protected `newPhpMailer()` and `htmlToText()`; its subclass `SigningMailer` sets up S/MIME signing with files that do not exist.
+The real Mailer runs on the kernel doubles in `tests/support/doubles.php`, with `CITOMNI_ENVIRONMENT` set to `prod`, a recording double as the log service, and an in-memory secrets double. Its cfg is the shipped `mail` baseline from `Registry::CFG_COMMON` with a sender, a Reply-To address and a host name added, pointed at `smtp-server.php` on a free local port with encryption `none`. A small subclass, `InspectableMailer`, exposes the protected `newPhpMailer()`, for `mail` itself or for a profile, and `htmlToText()`. Its subclass `SigningMailer` sets up S/MIME signing with files that do not exist, and `ProfileRecordingMailer` records the profile that each `newPhpMailer()` call gets.
 
 | File | Role |
 |---|---|
@@ -46,6 +46,8 @@ Checks marked as a regression cover a defect that the previous Mailer or a draft
 | transport and encryption follow the mail cfg | sendmail and its binary, `mail()`, `smtps`, `none`, no authentication without a username, host name |
 | invalid mail cfg values are refused with their cfg path | Every checked key, including the old `encryption` value `tls`, the removed `qmail` transport, a padded secret key, every removed key (`format`, `logging`, `smtp.auth`, `smtp.auto_tls`, `smtp.keepalive`, `smtp.password`), and SMTP hosts with an `ssl://` or `tls://` prefix, also in a later entry, a space, port 0, an empty entry or a non-ASCII name; the message names the path, and for a removed key what replaces it and only the type of its value. A host list with ports and an IPv6 address is accepted |
 | cfg addresses are checked the same whichever validator PHPMailer uses for the process | Regression: `init()` used PHPMailer's process-wide validator, which PHPMailer relaxes after a Unicode address |
+| a profile replaces whole keys of mail and takes the others from mail | A profile with its own `from` and `smtp`, one with only `from`, one with `sendmail` and its own host name, and an empty profile; no secret read |
+| invalid profiles are refused with the cfg path of the value | `mail.profiles` as a list or a string, a profile that is not a map, keys that a profile may not hold, `from`, `reply_to` and `smtp` without one of their keys or with another key, invalid values in a profile, `smtp` or `sendmail_path` for a transport that the profile does not use, its own or that of `mail`, and a value taken from `mail` that the profile's transport requires, under its `mail` path. A credential in a profile is refused without its value |
 | an HTML message goes out with the cfg sender and Reply-To, a generated text part and the Message-ID it returns | Defaults, headers, envelope, EHLO and Message-ID from `mail.hostname`, multipart/alternative |
 | the generated text part keeps link targets and drops style, script and tags | Regression: the text part lost link targets and kept CSS. Quoted, bare and empty targets, a `>` inside a quoted target |
 | a link left open in a long HTML body keeps its target and the rest of the text part | Regression: PCRE's backtrack limit emptied the text part |
@@ -64,6 +66,9 @@ Checks marked as a regression cover a defect that the previous Mailer or a draft
 | recipients take strings, lists and address => name pairs, a repeated address gets one copy, and Bcc stays out of the headers | Address arguments, duplicates across `to`, `cc` and `bcc` in any letter case |
 | internationalized addresses go out in punycode, once each, and no recipient is lost | Regression: a Cc recipient that was also the Reply-To address was lost, and one also given in punycode left the To header; `accepted` in the spelling of the arguments |
 | from and replyTo replace the cfg defaults for one message only | Envelope sender, `replyTo: []`, defaults back on the next message |
+| a profile sends with its own sender, Reply-To, host name, transport and password secret | Greeting, credentials, envelope sender, From, Reply-To and Message-ID of the profile; `from` and `replyTo` replace its sender and Reply-To but not its login; `mail` again on the next message without a profile; the profile that `newPhpMailer()` gets; `profile` in the log lines, and the profile's password not in them |
+| a profile without its own smtp sends through the smtp of mail | The login and password secret of `mail.smtp`, the sender of the profile, the Reply-To of `mail` |
+| an unknown profile throws InvalidArgumentException before anything is read or sent | A name in another letter case and an empty name; no session, no secret read |
 | invalid arguments throw InvalidArgumentException before anything is sent | No recipient or body, invalid addresses, an internationalized domain that punycode cannot express in `to` and in `from`, two senders, non-string entries, unreadable attachment |
 | stack traces of a refused send hold neither the bodies nor the message | Regression: PHPMailer's exception held the message in its trace arguments. `SensitiveParameter` on `html` and `text`, `zend.exception_ignore_args` restored |
 | attachments travel as MIME parts under the given file name | String keys as file names, the file's own name otherwise |

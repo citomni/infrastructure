@@ -122,6 +122,13 @@ class Registry {
 				'timeout'         => 15,                   // Seconds that connecting and each reply of the server may take, twice that for the reply to the message data; >= 1.
 			],
 
+			// Senders by name, for send(profile: ...), each with its own sender, Reply-To and
+			// transport. A profile holds any of from, reply_to, hostname, transport,
+			// sendmail_path and smtp; each key it holds replaces that key of mail whole, and the
+			// keys it leaves out come from mail. Its from, reply_to and smtp therefore hold every
+			// key of their node, and it holds smtp or sendmail_path only for its own transport.
+			'profiles' => [],
+
 			'log_errors'  => true,  // Log sends that the transport refused, to mailer.jsonl.
 			'log_success' => false, // Log sends that the transport accepted, to mailer.jsonl.
 		],

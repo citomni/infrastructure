@@ -18,6 +18,7 @@ namespace CitOmni\Infrastructure\Service;
 use CitOmni\Infrastructure\Exception\MailerConfigException;
 use CitOmni\Infrastructure\Exception\MailerException;
 use CitOmni\Infrastructure\Exception\MailerSendException;
+use CitOmni\Kernel\Cfg;
 use CitOmni\Kernel\Service\BaseService;
 use PHPMailer\PHPMailer\Exception as PHPMailerException;
 use PHPMailer\PHPMailer\PHPMailer;
@@ -27,9 +28,10 @@ use PHPMailer\PHPMailer\PHPMailer;
  * Mailer: Service that sends one email message per call through PHPMailer.
  *
  * Delivers finished messages: The caller passes the recipients, the subject and the bodies,
- * and cfg mail supplies the default sender and Reply-To and the transport. What a message
- * says, how its bodies are rendered and escaped, and what to do when the transport refuses it
- * belong to the caller; MIME encoding and the transports themselves belong to PHPMailer.
+ * and cfg mail supplies the default sender and Reply-To and the transport, which a profile
+ * under mail.profiles replaces for the messages that name it. What a message says, how its
+ * bodies are rendered and escaped, and what to do when the transport refuses it belong to
+ * the caller; MIME encoding and the transports themselves belong to PHPMailer.
  *
  * Rules:
  * - Keep no message state between calls: Build every message on a new PHPMailer from the
@@ -42,7 +44,31 @@ use PHPMailer\PHPMailer\PHPMailer;
  *   Mark body parameters SensitiveParameter, and turn zend.exception_ignore_args on while
  *   PHPMailer holds a message.
  * - Read the SMTP password from the secrets service only in a send that authenticates.
+ * - Keep a login with the host it was configured with: Take the smtp settings of a message
+ *   whole from its profile or whole from cfg mail, never key by key from both.
  * - Keep logging best-effort: A failing log write never changes what send() returns or throws.
+ *
+ * @phpstan-type Settings array{
+ *   from:array{0:string,1:string},
+ *   replyTo:list<array{0:string,1:string}>,
+ *   hostname:string,
+ *   transport:string,
+ *   sendmailPath:string,
+ *   smtpHost:string,
+ *   smtpPort:int,
+ *   smtpSecure:string,
+ *   smtpUsername:string,
+ *   smtpPasswordSecret:string,
+ *   smtpTimeout:int
+ * }
+ * @phpstan-type Node array{
+ *   from:array{email:mixed,name:mixed},
+ *   reply_to:array{email:mixed,name:mixed},
+ *   hostname:mixed,
+ *   transport:mixed,
+ *   sendmail_path:mixed,
+ *   smtp:array{host:mixed,port:mixed,encryption:mixed,username:mixed,password_secret:mixed,timeout:mixed}
+ * }
  */
 class Mailer extends BaseService {
 
@@ -63,41 +89,21 @@ class Mailer extends BaseService {
 		'password'  => 'the secret that mail.smtp.password_secret names holds the password',
 	];
 
-	/** Sender address of a message that names no sender. */
-	private string $fromEmail;
+	/** Keys that a profile may hold, each with the keys that its node must hold; [] for a key that holds a value. */
+	private const array PROFILE_KEYS = [
+		'from'          => ['email', 'name'],
+		'reply_to'      => ['email', 'name'],
+		'hostname'      => [],
+		'transport'     => [],
+		'sendmail_path' => [],
+		'smtp'          => ['host', 'port', 'encryption', 'username', 'password_secret', 'timeout'],
+	];
 
-	/** Display name of that sender; '' for none. */
-	private string $fromName;
+	/** @var Settings Sender, Reply-To and transport of a message that names no profile. */
+	private array $default;
 
-	/** @var list<array{0:string,1:string}> Address and display name pairs for the Reply-To of a message that names none; [] for none. */
-	private array $replyTo;
-
-	/** Host name for the Message-ID header and the SMTP greeting; '' leaves the choice to PHPMailer. */
-	private string $hostname;
-
-	/** Transport: smtp, sendmail or mail. */
-	private string $transport;
-
-	/** Binary of the sendmail transport. */
-	private string $sendmailPath;
-
-	/** SMTP host, or several separated by ';', each optionally with :port. */
-	private string $smtpHost;
-
-	/** SMTP port. */
-	private int $smtpPort;
-
-	/** PHPMailer SMTPSecure value: tls for STARTTLS, ssl for implicit TLS, '' for none. */
-	private string $smtpSecure;
-
-	/** SMTP user name; '' for no authentication. */
-	private string $smtpUsername;
-
-	/** Secrets key that holds the SMTP password. */
-	private string $smtpPasswordSecret;
-
-	/** Seconds that connecting and each reply of the SMTP server may take. */
-	private int $smtpTimeout;
+	/** @var array<int|string,Settings> Sender, Reply-To and transport of each profile, by its name under cfg mail.profiles. */
+	private array $profiles;
 
 	/** Log sends that the transport refused. */
 	private bool $logErrors;
@@ -111,23 +117,19 @@ class Mailer extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Read and check cfg mail once.
+	 * Read and check cfg mail once, the profiles under mail.profiles included.
 	 *
 	 * Behavior:
-	 * - Requires mail.from.email always, mail.smtp.host for the smtp transport and
-	 *   mail.sendmail_path for the sendmail transport. Every other value only has to be valid,
-	 *   also when its transport is not the one in use.
-	 * - Checks addresses with PHPMailer's php validator, whichever validator PHPMailer uses for
-	 *   the process at the time.
-	 * - Accepts in mail.smtp.host only what PHPMailer connects to: host names or IP addresses
-	 *   separated by ';', each optionally with :port. Refuses an ssl:// or tls:// prefix, with
-	 *   which PHPMailer would replace the encryption of mail.smtp.encryption for that host.
+	 * - Checks the sender, Reply-To and transport of cfg mail, and those of every profile: cfg
+	 *   mail with each key that the profile holds replaced whole.
 	 * - Refuses the keys that cfg mail no longer has, such as mail.smtp.auth and
 	 *   mail.smtp.password, whatever their value, and names only the type of that value.
 	 * - Reads no secret and opens no connection.
 	 *
 	 * @return void
-	 * @throws \CitOmni\Infrastructure\Exception\MailerConfigException  When a value under cfg mail is invalid, empty where it is required, or under a key that cfg mail no longer has; the exception names its cfg path.
+	 * @throws \CitOmni\Infrastructure\Exception\MailerConfigException  When a value under cfg mail is invalid, empty where it is required, or under a key that cfg mail or a profile may not have; the exception names its cfg path.
+	 * @see \CitOmni\Infrastructure\Service\Mailer::cfgSettings()  The checks of each value.
+	 * @see \CitOmni\Infrastructure\Service\Mailer::cfgProfile()  What a profile may hold.
 	 * @see \CitOmni\Kernel\Service\BaseService::__construct()  Calls it once per instance.
 	 */
 	protected function init(): void {
@@ -140,47 +142,45 @@ class Mailer extends BaseService {
 		self::refuseRemovedKeys($mail->toArray(), 'mail', self::REMOVED_KEYS);
 		self::refuseRemovedKeys($smtp->toArray(), 'mail.smtp', self::REMOVED_SMTP_KEYS);
 
-		$transport = $mail->transport;
-		if (!\in_array($transport, ['smtp', 'sendmail', 'mail'], true)) {
-			throw new MailerConfigException('mail.transport', "'smtp', 'sendmail' or 'mail'", $transport);
+		// The values of cfg mail, keyed like a profile, so that each key a profile holds
+		// replaces one of them whole.
+		$node = [
+			'from'          => ['email' => $mail->from->email, 'name' => $mail->from->name],
+			'reply_to'      => ['email' => $mail->reply_to->email, 'name' => $mail->reply_to->name],
+			'hostname'      => $mail->hostname,
+			'transport'     => $mail->transport,
+			'sendmail_path' => $mail->sendmail_path,
+			'smtp'          => [
+				'host'            => $smtp->host,
+				'port'            => $smtp->port,
+				'encryption'      => $smtp->encryption,
+				'username'        => $smtp->username,
+				'password_secret' => $smtp->password_secret,
+				'timeout'         => $smtp->timeout,
+			],
+		];
+		$at = [
+			'from'          => 'mail.from',
+			'reply_to'      => 'mail.reply_to',
+			'hostname'      => 'mail.hostname',
+			'transport'     => 'mail.transport',
+			'sendmail_path' => 'mail.sendmail_path',
+			'smtp'          => 'mail.smtp',
+		];
+		$this->default = self::cfgSettings($node, $at);
+
+		$value    = $mail->profiles;
+		$profiles = $value instanceof Cfg ? $value->toArray() : $value;
+		if (!\is_array($profiles) || ($profiles !== [] && \array_is_list($profiles))) {
+			throw new MailerConfigException('mail.profiles', 'a map of profile names to profiles', $profiles);
+		}
+		$this->profiles = [];
+		foreach ($profiles as $name => $profile) {
+			$this->profiles[$name] = self::cfgProfile($profile, 'mail.profiles.' . $name, $node, $at);
 		}
 
-		$encryption = $smtp->encryption;
-		$secure = match ($encryption) {
-			'starttls' => PHPMailer::ENCRYPTION_STARTTLS,
-			'smtps'    => PHPMailer::ENCRYPTION_SMTPS,
-			'none'     => '',
-			default    => throw new MailerConfigException('mail.smtp.encryption', "'starttls', 'smtps' or 'none'", $encryption),
-		};
-
-		$hostname = $mail->hostname;
-		if (!\is_string($hostname) || ($hostname !== '' && !PHPMailer::isValidHost($hostname))) {
-			throw new MailerConfigException('mail.hostname', "'' or a valid host name", $hostname);
-		}
-
-		// The secrets service refuses a padded key; refusing it here names the cfg path instead.
-		$passwordSecret = $smtp->password_secret;
-		if (!\is_string($passwordSecret) || $passwordSecret === '' || \trim($passwordSecret) !== $passwordSecret) {
-			throw new MailerConfigException('mail.smtp.password_secret', 'a non-empty string without leading or trailing whitespace', $passwordSecret);
-		}
-
-		$replyToEmail = self::cfgAddress($mail->reply_to->email, 'mail.reply_to.email', false);
-		$replyToName  = self::cfgString($mail->reply_to->name, 'mail.reply_to.name', false);
-
-		$this->transport          = $transport;
-		$this->fromEmail          = self::cfgAddress($mail->from->email, 'mail.from.email', true);
-		$this->fromName           = self::cfgString($mail->from->name, 'mail.from.name', false);
-		$this->replyTo            = $replyToEmail !== '' ? [[$replyToEmail, $replyToName]] : [];
-		$this->hostname           = $hostname;
-		$this->sendmailPath       = self::cfgString($mail->sendmail_path, 'mail.sendmail_path', $transport === 'sendmail');
-		$this->smtpHost           = self::cfgHosts($smtp->host, 'mail.smtp.host', $transport === 'smtp');
-		$this->smtpPort           = self::cfgInt($smtp->port, 'mail.smtp.port', 1, 65535);
-		$this->smtpSecure         = $secure;
-		$this->smtpUsername       = self::cfgString($smtp->username, 'mail.smtp.username', false);
-		$this->smtpPasswordSecret = $passwordSecret;
-		$this->smtpTimeout        = self::cfgInt($smtp->timeout, 'mail.smtp.timeout', 1, \PHP_INT_MAX);
-		$this->logErrors          = self::cfgBool($mail->log_errors, 'mail.log_errors');
-		$this->logSuccess         = self::cfgBool($mail->log_success, 'mail.log_success');
+		$this->logErrors  = self::cfgBool($mail->log_errors, 'mail.log_errors');
+		$this->logSuccess = self::cfgBool($mail->log_success, 'mail.log_success');
 	}
 
 
@@ -203,10 +203,13 @@ class Mailer extends BaseService {
 	 *   that names it. An internationalized domain is sent in punycode.
 	 * - With html, the message has a plain-text alternative: text, or htmlToText() of html
 	 *   when text is ''. An alternative that comes out empty is left out.
-	 * - from and replyTo replace the cfg default for this message: null keeps it, and
-	 *   replyTo [] sends no Reply-To. With SMTP, the From address is also the envelope sender.
+	 * - profile selects the sender, Reply-To and transport of that profile under cfg
+	 *   mail.profiles in place of those of cfg mail. from and replyTo replace the sender and
+	 *   Reply-To for this message: null keeps them, and replyTo [] sends no Reply-To. With
+	 *   SMTP, the From address is also the envelope sender.
 	 * - Checks every argument before it reads a secret or opens a connection.
-	 * - Reads the secret that cfg mail.smtp.password_secret names only when it authenticates.
+	 * - Reads the secret that smtp.password_secret of the profile or of cfg mail names, only
+	 *   when it authenticates.
 	 * - Checks all addresses of the message with one validator: PHPMailer's process-wide one,
 	 *   or eai when that is php and an address has UTF-8 in its local part, the switch that
 	 *   PHPMailer itself makes at such an address. The order of the addresses does not matter.
@@ -214,9 +217,9 @@ class Mailer extends BaseService {
 	 * - Writes a mailer.error line to mailer.jsonl for a refused send when cfg mail.log_errors
 	 *   is true, and a mailer.success line for an accepted send when cfg mail.log_success is
 	 *   true, both only when the app has a log service. A line holds the Message-ID, the
-	 *   transport, the addresses as sent, the subject and the duration, and for a refusal the
-	 *   error, which quotes the server's reply as the server wrote it, and the addresses that
-	 *   accepted the message.
+	 *   profile, the transport, the addresses as sent, the subject and the duration, and for a
+	 *   refusal the error, which quotes the server's reply as the server wrote it, and the
+	 *   addresses that accepted the message.
 	 *
 	 * Notes:
 	 * - Bodies go out as given. Escape untrusted values for HTML before they reach html.
@@ -230,6 +233,7 @@ class Mailer extends BaseService {
 	 *
 	 * Typical usage:
 	 *   $messageId = $this->app->mailer->send(to: $email, subject: $subject, html: $html);
+	 *   $messageId = $this->app->mailer->send(to: $email, subject: $subject, html: $html, profile: 'billing');
 	 *
 	 * @param  string|array<int|string,string>  $to  Recipients; [] when cc or bcc names one.
 	 * @param  string  $subject
@@ -237,24 +241,27 @@ class Mailer extends BaseService {
 	 * @param  string  $text  Plain-text body; '' for none.
 	 * @param  string|array<int|string,string>  $cc
 	 * @param  string|array<int|string,string>  $bcc  Recipients left out of the headers.
-	 * @param  string|array<int|string,string>|null  $replyTo  Null for the Reply-To of cfg mail.reply_to.
-	 * @param  string|array<int|string,string>|null  $from  One address; null for the sender of cfg mail.from.
+	 * @param  string|array<int|string,string>|null  $replyTo  Null for the Reply-To of the profile or of cfg mail.
+	 * @param  string|array<int|string,string>|null  $from  One address; null for the sender of the profile or of cfg mail.
 	 * @param  array<int|string,string>  $attachments  Paths of readable files; a string key is the file name the recipient sees.
+	 * @param  string|null  $profile  Name of a profile under cfg mail.profiles; null for cfg mail itself.
 	 * @return string  The Message-ID header value, angle brackets included.
-	 * @throws \InvalidArgumentException  When no recipient or no body is given, from does not name exactly one address, an entry of an array argument is not a string, an address has a non-ASCII domain that cannot be converted to punycode, or PHPMailer rejects an address or cannot read an attachment. Nothing is sent.
+	 * @throws \InvalidArgumentException  When profile names no profile under cfg mail.profiles, no recipient or no body is given, from does not name exactly one address, an entry of an array argument is not a string, an address has a non-ASCII domain that cannot be converted to punycode, or PHPMailer rejects an address or cannot read an attachment. Nothing is sent.
 	 * @throws \CitOmni\Infrastructure\Exception\MailerException  When PHPMailer cannot build the message from valid arguments, such as when signing that an override of newPhpMailer() sets up fails. Nothing is sent.
 	 * @throws \CitOmni\Infrastructure\Exception\MailerSendException  When the transport did not confirm the message for every recipient; its message quotes the server's reply as the server wrote it, and its accepted list uses the spelling of the arguments.
-	 * @throws \OutOfBoundsException  When the secret that cfg mail.smtp.password_secret names does not exist.
+	 * @throws \OutOfBoundsException  When the secret that smtp.password_secret of the profile or of cfg mail names does not exist.
 	 * @see \CitOmni\Infrastructure\Service\Secrets::get()  The other failures to read that secret.
 	 */
-	public function send(string|array $to, string $subject, #[\SensitiveParameter] string $html = '', #[\SensitiveParameter] string $text = '', string|array $cc = [], string|array $bcc = [], string|array|null $replyTo = null, string|array|null $from = null, array $attachments = []): string {
+	public function send(string|array $to, string $subject, #[\SensitiveParameter] string $html = '', #[\SensitiveParameter] string $text = '', string|array $cc = [], string|array $bcc = [], string|array|null $replyTo = null, string|array|null $from = null, array $attachments = [], ?string $profile = null): string {
 
 		// -- 1. Check the arguments ---------------------------------------
 		if ($html === '' && $text === '') {
 			throw new \InvalidArgumentException('A message needs an html or a text body.');
 		}
 
-		$sender = $from === null ? [[$this->fromEmail, $this->fromName]] : self::addresses($from, 'from');
+		$settings = $this->settings($profile);
+
+		$sender = $from === null ? [$settings['from']] : self::addresses($from, 'from');
 		if (\count($sender) !== 1) {
 			throw new \InvalidArgumentException('from must name exactly one address.');
 		}
@@ -263,7 +270,7 @@ class Mailer extends BaseService {
 			'to'      => self::addresses($to, 'to'),
 			'cc'      => self::addresses($cc, 'cc'),
 			'bcc'     => self::addresses($bcc, 'bcc'),
-			'replyTo' => $replyTo === null ? $this->replyTo : self::addresses($replyTo, 'replyTo'),
+			'replyTo' => $replyTo === null ? $settings['replyTo'] : self::addresses($replyTo, 'replyTo'),
 		];
 		if ($lists['to'] === [] && $lists['cc'] === [] && $lists['bcc'] === []) {
 			throw new \InvalidArgumentException('A message needs a recipient in to, cc or bcc.');
@@ -285,7 +292,7 @@ class Mailer extends BaseService {
 		try {
 
 			// -- 2. Build the message -------------------------------------
-			$mail = $this->newPhpMailer();
+			$mail = $this->newPhpMailer($profile);
 			try {
 				$spelling = $this->compose($mail, $sender[0], $lists, $subject, $html, $text, $attachments);
 			} catch (PHPMailerException $e) {
@@ -301,7 +308,7 @@ class Mailer extends BaseService {
 
 			// -- 3. Hand it to the transport ------------------------------
 			if ($mail->SMTPAuth) {
-				$mail->Password = $this->app->secrets->get($this->smtpPasswordSecret);
+				$mail->Password = $this->app->secrets->get($settings['smtpPasswordSecret']);
 			}
 
 			$accepted = [];
@@ -335,13 +342,13 @@ class Mailer extends BaseService {
 			// ErrorInfo adds the server's reply to the exception message when there was one.
 			$error = $mail->ErrorInfo !== '' ? $mail->ErrorInfo : $refusal->getMessage();
 			if ($this->logErrors) {
-				$this->log('mailer.error', 'Mail transport refused the message.', self::logContext($mail, $startedAt) + ['error' => $error, 'accepted' => $accepted]);
+				$this->log('mailer.error', 'Mail transport refused the message.', self::logContext($mail, $profile, $startedAt) + ['error' => $error, 'accepted' => $accepted]);
 			}
 			throw new MailerSendException($error, $accepted, $refusal);
 		}
 
 		if ($this->logSuccess) {
-			$this->log('mailer.success', 'Mail transport accepted the message.', self::logContext($mail, $startedAt));
+			$this->log('mailer.success', 'Mail transport accepted the message.', self::logContext($mail, $profile, $startedAt));
 		}
 
 		return $mail->getLastMessageID();
@@ -353,44 +360,48 @@ class Mailer extends BaseService {
 	// ----------------------------------------------------------------
 
 	/**
-	 * Create the PHPMailer for one message, set up with the transport of cfg mail and no message.
+	 * Create the PHPMailer for one message, set up with the transport of a profile and no message.
 	 *
 	 * The one place where the service configures PHPMailer. A subclass may override it to set
-	 * what cfg mail does not cover, such as DKIM signing or SMTP stream options, on the
-	 * instance that the parent returns.
+	 * what cfg mail does not cover, such as DKIM signing per profile or SMTP stream options, on
+	 * the instance that the parent returns for the same profile.
 	 *
 	 * Behavior:
 	 * - Every PHPMailer error on the instance throws a PHPMailer exception.
 	 * - Sends UTF-8 with the X-Mailer header CitOmni Mailer.
-	 * - SMTP uses exactly the encryption of cfg mail.smtp.encryption, sets PHPMailer's time
-	 *   limits for connecting and for a reply to cfg mail.smtp.timeout, and authenticates when
-	 *   cfg mail.smtp.username is set; the password is left to send().
+	 * - SMTP uses exactly the smtp.encryption of the profile or of cfg mail, sets PHPMailer's
+	 *   time limits for connecting and for a reply to its smtp.timeout, and authenticates when
+	 *   its smtp.username is set; the password is left to send().
 	 *
+	 * @param  string|null  $profile  Name of a profile under cfg mail.profiles; null for cfg mail itself.
 	 * @return \PHPMailer\PHPMailer\PHPMailer
+	 * @throws \InvalidArgumentException  When cfg mail.profiles has no profile of that name.
 	 * @see \CitOmni\Infrastructure\Service\Mailer::send()  How a message is reported that PHPMailer cannot build with what an override set up.
 	 */
-	protected function newPhpMailer(): PHPMailer {
+	protected function newPhpMailer(?string $profile): PHPMailer {
+		$settings = $this->settings($profile);
+
 		$mail = new PHPMailer(true);
 		$mail->CharSet  = PHPMailer::CHARSET_UTF8;
 		$mail->XMailer  = 'CitOmni Mailer';
-		$mail->Hostname = $this->hostname;
+		$mail->Hostname = $settings['hostname'];
 
-		if ($this->transport === 'smtp') {
+		if ($settings['transport'] === 'smtp') {
 			$mail->isSMTP();
-			$mail->Host       = $this->smtpHost;
-			$mail->Port       = $this->smtpPort;
-			$mail->SMTPSecure = $this->smtpSecure;
-			// cfg mail.smtp.encryption is the whole TLS policy, so 'none' must not upgrade on its own.
+			$mail->Host       = $settings['smtpHost'];
+			$mail->Port       = $settings['smtpPort'];
+			$mail->SMTPSecure = $settings['smtpSecure'];
+			// smtp.encryption is the whole TLS policy, so 'none' must not upgrade on its own.
 			$mail->SMTPAutoTLS = false;
-			$mail->Timeout     = $this->smtpTimeout;
+			$mail->Timeout     = $settings['smtpTimeout'];
 			// Timeout covers connecting and reading a reply that has begun; the wait for a reply
 			// to begin is the SMTP instance's Timelimit, 300 seconds unless set.
-			$mail->getSMTPInstance()->Timelimit = $this->smtpTimeout;
-			$mail->SMTPAuth = $this->smtpUsername !== '';
-			$mail->Username = $this->smtpUsername;
-		} elseif ($this->transport === 'sendmail') {
+			$mail->getSMTPInstance()->Timelimit = $settings['smtpTimeout'];
+			$mail->SMTPAuth = $settings['smtpUsername'] !== '';
+			$mail->Username = $settings['smtpUsername'];
+		} elseif ($settings['transport'] === 'sendmail') {
 			$mail->isSendmail();
-			$mail->Sendmail = $this->sendmailPath;
+			$mail->Sendmail = $settings['sendmailPath'];
 		} else {
 			$mail->isMail();
 		}
@@ -439,6 +450,22 @@ class Mailer extends BaseService {
 	// ----------------------------------------------------------------
 	// Internals
 	// ----------------------------------------------------------------
+
+	/**
+	 * Return the sender, Reply-To and transport of a profile, or of cfg mail itself.
+	 *
+	 * @param  string|null  $profile  Name of a profile under cfg mail.profiles; null for cfg mail itself.
+	 * @return Settings
+	 * @throws \InvalidArgumentException  When cfg mail.profiles has no profile of that name.
+	 */
+	private function settings(?string $profile): array {
+		if ($profile === null) {
+			return $this->default;
+		}
+
+		return $this->profiles[$profile] ?? throw new \InvalidArgumentException("Cfg mail.profiles has no profile named '{$profile}'.");
+	}
+
 
 	/**
 	 * Put the sender, the recipients, the subject, the bodies and the attachments on a new PHPMailer.
@@ -676,12 +703,14 @@ class Mailer extends BaseService {
 	 * Return the fields of a log line about a send: no body and no credential.
 	 *
 	 * @param  \PHPMailer\PHPMailer\PHPMailer  $mail  The message, after preSend().
+	 * @param  string|null  $profile  Name of the profile of the message; null for cfg mail itself.
 	 * @param  float  $startedAt  microtime(true) when the transport started.
-	 * @return array{message_id:string,transport:string,from:string,to:list<string>,cc:list<string>,bcc:list<string>,subject:string,duration_ms:int}
+	 * @return array{message_id:string,profile:?string,transport:string,from:string,to:list<string>,cc:list<string>,bcc:list<string>,subject:string,duration_ms:int}
 	 */
-	private static function logContext(PHPMailer $mail, float $startedAt): array {
+	private static function logContext(PHPMailer $mail, ?string $profile, float $startedAt): array {
 		return [
 			'message_id'  => $mail->getLastMessageID(),
+			'profile'     => $profile,
 			'transport'   => $mail->Mailer,
 			'from'        => $mail->From,
 			'to'          => \array_column($mail->getToAddresses(), 0),
@@ -733,6 +762,136 @@ class Mailer extends BaseService {
 				throw new MailerConfigException($path . '.' . $key, 'absent (' . $replacement . ')', $node[$key], false);
 			}
 		}
+	}
+
+
+	/**
+	 * Return the cfg values of a sender and its transport as send() uses them.
+	 *
+	 * Behavior:
+	 * - Requires from.email always, smtp.host for the smtp transport and sendmail_path for the
+	 *   sendmail transport. Every other value only has to be valid, also when its transport is
+	 *   not the one in use.
+	 * - Checks addresses with PHPMailer's php validator, whichever validator PHPMailer uses for
+	 *   the process at the time.
+	 * - Accepts in smtp.host only what PHPMailer connects to: host names or IP addresses
+	 *   separated by ';', each optionally with :port. Refuses an ssl:// or tls:// prefix, with
+	 *   which PHPMailer would replace the encryption of smtp.encryption for that host.
+	 *
+	 * @param  Node  $node  The values of cfg mail or of a profile.
+	 * @param  array<string,string>  $at  Cfg path of each key of $node.
+	 * @return Settings
+	 * @throws \CitOmni\Infrastructure\Exception\MailerConfigException  When a value is invalid, or empty where it is required; the exception names the cfg path of the value.
+	 */
+	private static function cfgSettings(array $node, array $at): array {
+		$transport = $node['transport'];
+		if (!\in_array($transport, ['smtp', 'sendmail', 'mail'], true)) {
+			throw new MailerConfigException($at['transport'], "'smtp', 'sendmail' or 'mail'", $transport);
+		}
+
+		$smtp       = $node['smtp'];
+		$encryption = $smtp['encryption'];
+		$secure = match ($encryption) {
+			'starttls' => PHPMailer::ENCRYPTION_STARTTLS,
+			'smtps'    => PHPMailer::ENCRYPTION_SMTPS,
+			'none'     => '',
+			default    => throw new MailerConfigException($at['smtp'] . '.encryption', "'starttls', 'smtps' or 'none'", $encryption),
+		};
+
+		$hostname = $node['hostname'];
+		if (!\is_string($hostname) || ($hostname !== '' && !PHPMailer::isValidHost($hostname))) {
+			throw new MailerConfigException($at['hostname'], "'' or a valid host name", $hostname);
+		}
+
+		// The secrets service refuses a padded key; refusing it here names the cfg path instead.
+		$passwordSecret = $smtp['password_secret'];
+		if (!\is_string($passwordSecret) || $passwordSecret === '' || \trim($passwordSecret) !== $passwordSecret) {
+			throw new MailerConfigException($at['smtp'] . '.password_secret', 'a non-empty string without leading or trailing whitespace', $passwordSecret);
+		}
+
+		$replyToEmail = self::cfgAddress($node['reply_to']['email'], $at['reply_to'] . '.email', false);
+		$replyToName  = self::cfgString($node['reply_to']['name'], $at['reply_to'] . '.name', false);
+
+		return [
+			'from'               => [self::cfgAddress($node['from']['email'], $at['from'] . '.email', true), self::cfgString($node['from']['name'], $at['from'] . '.name', false)],
+			'replyTo'            => $replyToEmail !== '' ? [[$replyToEmail, $replyToName]] : [],
+			'hostname'           => $hostname,
+			'transport'          => $transport,
+			'sendmailPath'       => self::cfgString($node['sendmail_path'], $at['sendmail_path'], $transport === 'sendmail'),
+			'smtpHost'           => self::cfgHosts($smtp['host'], $at['smtp'] . '.host', $transport === 'smtp'),
+			'smtpPort'           => self::cfgInt($smtp['port'], $at['smtp'] . '.port', 1, 65535),
+			'smtpSecure'         => $secure,
+			'smtpUsername'       => self::cfgString($smtp['username'], $at['smtp'] . '.username', false),
+			'smtpPasswordSecret' => $passwordSecret,
+			'smtpTimeout'        => self::cfgInt($smtp['timeout'], $at['smtp'] . '.timeout', 1, \PHP_INT_MAX),
+		];
+	}
+
+
+	/**
+	 * Return the settings of one profile: cfg mail with each key that the profile holds replaced whole.
+	 *
+	 * Behavior:
+	 * - A profile holds any of from, reply_to, hostname, transport, sendmail_path and smtp. Its
+	 *   from, reply_to and smtp hold every key of that node and no other.
+	 * - A profile holds smtp only when its transport is smtp, and sendmail_path only when it is
+	 *   sendmail, whether the transport is its own or that of cfg mail.
+	 * - Reports a value that the profile takes from cfg mail under its cfg mail path.
+	 * - Names only the type of a value under a key that a profile may not hold, such as a
+	 *   password in smtp.
+	 *
+	 * @param  mixed  $profile  The cfg value of the profile.
+	 * @param  string  $path  Cfg path of the profile.
+	 * @param  Node  $node  The values of cfg mail.
+	 * @param  array<string,string>  $at  Cfg path of each key of $node.
+	 * @return Settings
+	 * @throws \CitOmni\Infrastructure\Exception\MailerConfigException  When the profile is not a map, holds a key that it may not hold or a node without one of its keys, holds smtp or sendmail_path for a transport that it does not use, or leaves a value invalid or empty where it is required; the exception names the cfg path of the value.
+	 * @see \CitOmni\Infrastructure\Service\Mailer::cfgSettings()  The checks of each value.
+	 */
+	private static function cfgProfile(mixed $profile, string $path, array $node, array $at): array {
+		if (!\is_array($profile)) {
+			throw new MailerConfigException($path, 'a map with any of the keys ' . \implode(', ', \array_keys(self::PROFILE_KEYS)), $profile, false);
+		}
+
+		foreach ($profile as $key => $value) {
+			$keys = self::PROFILE_KEYS[$key] ?? null;
+			if ($keys === null) {
+				throw new MailerConfigException($path . '.' . $key, 'absent (a profile holds only ' . \implode(', ', \array_keys(self::PROFILE_KEYS)) . ')', $value, false);
+			}
+
+			// A node replaces that of cfg mail whole, never key by key: a profile's own SMTP host
+			// then always comes with its own login, and its own address with its own name.
+			if ($keys !== []) {
+				if (!\is_array($value)) {
+					throw new MailerConfigException($path . '.' . $key, 'a map with the keys ' . \implode(', ', $keys), $value, false);
+				}
+				foreach ($value as $subKey => $subValue) {
+					if (!\in_array($subKey, $keys, true)) {
+						throw new MailerConfigException($path . '.' . $key . '.' . $subKey, "absent (a profile's {$key} holds only " . \implode(', ', $keys) . ')', $subValue, false);
+					}
+				}
+				foreach ($keys as $subKey) {
+					if (!\array_key_exists($subKey, $value)) {
+						throw new MailerConfigException($path . '.' . $key . '.' . $subKey, "set, since a profile's {$key} replaces mail.{$key} whole", null);
+					}
+				}
+			}
+
+			$node[$key] = $value;
+			$at[$key]   = $path . '.' . $key;
+		}
+
+		$settings = self::cfgSettings($node, $at);
+
+		// Settings of a transport that the profile does not use would never take effect.
+		if (\array_key_exists('smtp', $profile) && $settings['transport'] !== 'smtp') {
+			throw new MailerConfigException($path . '.smtp', "absent unless the profile's transport is smtp", $profile['smtp']);
+		}
+		if (\array_key_exists('sendmail_path', $profile) && $settings['transport'] !== 'sendmail') {
+			throw new MailerConfigException($path . '.sendmail_path', "absent unless the profile's transport is sendmail", $profile['sendmail_path']);
+		}
+
+		return $settings;
 	}
 
 

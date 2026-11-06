@@ -93,15 +93,18 @@ require __DIR__ . '/../../src/Service/Mailer.php';
 /** Secret SMTP password of the checks; it must never show up in a log record. */
 const SMTP_PASSWORD = 'smtp-secret-7f3a';
 
+/** Secret SMTP password of the billing profile in the checks; it must never show up in a log record either. */
+const BILLING_PASSWORD = 'billing-secret-9c1e';
+
 
 /**
  * Mailer with access to its protected extension points.
  */
 class InspectableMailer extends Mailer {
 
-	/** The PHPMailer that the next message would start from. */
-	public function transport(): PHPMailer {
-		return $this->newPhpMailer();
+	/** The PHPMailer that the next message of the profile would start from; null for cfg mail itself. */
+	public function transport(?string $profile = null): PHPMailer {
+		return $this->newPhpMailer($profile);
 	}
 
 	/** The plain-text alternative generated for an HTML body. */
@@ -116,10 +119,25 @@ class InspectableMailer extends Mailer {
  */
 class SigningMailer extends InspectableMailer {
 
-	protected function newPhpMailer(): PHPMailer {
-		$mail = parent::newPhpMailer();
+	protected function newPhpMailer(?string $profile): PHPMailer {
+		$mail = parent::newPhpMailer($profile);
 		$mail->sign(SmtpServer::$dir . '/missing-cert.pem', SmtpServer::$dir . '/missing-key.pem', '');
 		return $mail;
+	}
+}
+
+
+/**
+ * Mailer that records the profile of every PHPMailer it creates, as an override that signs per profile would see it.
+ */
+class ProfileRecordingMailer extends InspectableMailer {
+
+	/** @var list<string|null> Profiles passed to newPhpMailer(), in order. */
+	public array $requested = [];
+
+	protected function newPhpMailer(?string $profile): PHPMailer {
+		$this->requested[] = $profile;
+		return parent::newPhpMailer($profile);
 	}
 }
 
@@ -335,6 +353,79 @@ $checks = [
 		} finally {
 			PHPMailer::$validator = 'php';
 		}
+	},
+
+	'a profile replaces whole keys of mail and takes the others from mail' => static function (): void {
+		[$mailer, , $secrets] = mailer(['profiles' => [
+			'billing' => [
+				'from' => ['email' => 'billing@example.com', 'name' => 'Billing'],
+				'smtp' => ['host' => 'smtp.billing.example', 'port' => 465, 'encryption' => 'smtps', 'username' => 'billing@example.com', 'password_secret' => 'billing.password', 'timeout' => 30],
+			],
+			'notices' => ['from' => ['email' => 'notices@example.com', 'name' => '']],
+			'local'   => ['hostname' => 'local.example', 'transport' => 'sendmail', 'sendmail_path' => '/opt/bin/sendmail'],
+			'alias'   => [],
+		]]);
+		$billing = $mailer->transport('billing');
+		same(
+			['smtp', 'smtp.billing.example', 465, PHPMailer::ENCRYPTION_SMTPS, false, true, 'billing@example.com', 30, 30, 'mailer.citomni.test'],
+			[$billing->Mailer, $billing->Host, $billing->Port, $billing->SMTPSecure, $billing->SMTPAutoTLS, $billing->SMTPAuth, $billing->Username, $billing->Timeout, $billing->getSMTPInstance()->Timelimit, $billing->Hostname],
+			'billing: transport, host, port, secure, auto TLS, auth, username, timeout, time limit, host name'
+		);
+		$notices = $mailer->transport('notices');
+		same(
+			['smtp', '127.0.0.1', SmtpServer::$port, '', 'mailer@example.com', 5, 'mailer.citomni.test'],
+			[$notices->Mailer, $notices->Host, $notices->Port, $notices->SMTPSecure, $notices->Username, $notices->Timeout, $notices->Hostname],
+			'notices: the transport and host name of mail'
+		);
+		$local = $mailer->transport('local');
+		same(['sendmail', '/opt/bin/sendmail', 'local.example'], [$local->Mailer, $local->Sendmail, $local->Hostname], 'local: transport, binary and host name');
+		$alias = $mailer->transport('alias');
+		same(['smtp', '127.0.0.1', 'mailer@example.com'], [$alias->Mailer, $alias->Host, $alias->Username], 'alias: an empty profile is mail itself');
+		$own = $mailer->transport();
+		same(['smtp', '127.0.0.1', 'mailer@example.com'], [$own->Mailer, $own->Host, $own->Username], 'mail itself');
+		same([], $secrets->reads, 'secret reads');
+	},
+
+	'invalid profiles are refused with the cfg path of the value' => static function (): void {
+		$smtp = ['host' => 'smtp.billing.example', 'port' => 587, 'encryption' => 'starttls', 'username' => 'billing@example.com', 'password_secret' => 'billing.password', 'timeout' => 15];
+		$cases = [
+			[['profiles' => [['from' => ['email' => 'billing@example.com', 'name' => '']]]], 'mail.profiles'],
+			[['profiles' => 'billing'], 'mail.profiles'],
+			[['profiles' => ['billing' => 'smtp.billing.example']], 'mail.profiles.billing'],
+			[['profiles' => ['billing' => ['log_errors' => false]]], 'mail.profiles.billing.log_errors'],
+			[['profiles' => ['billing' => ['profiles' => []]]], 'mail.profiles.billing.profiles'],
+			[['profiles' => ['billing' => ['from' => 'billing@example.com']]], 'mail.profiles.billing.from'],
+			[['profiles' => ['billing' => ['from' => ['email' => 'billing@example.com']]]], 'mail.profiles.billing.from.name'],
+			[['profiles' => ['billing' => ['from' => ['email' => 'nobody', 'name' => '']]]], 'mail.profiles.billing.from.email'],
+			[['profiles' => ['billing' => ['reply_to' => ['email' => '', 'name' => '', 'address' => 'accounts@example.com']]]], 'mail.profiles.billing.reply_to.address'],
+			[['profiles' => ['billing' => ['hostname' => 'not a host']]], 'mail.profiles.billing.hostname'],
+			[['profiles' => ['billing' => ['transport' => 'qmail']]], 'mail.profiles.billing.transport'],
+			[['profiles' => ['billing' => ['smtp' => \array_diff_key($smtp, ['timeout' => true])]]], 'mail.profiles.billing.smtp.timeout'],
+			[['profiles' => ['billing' => ['smtp' => ['password' => 'cfg-password-123'] + $smtp]]], 'mail.profiles.billing.smtp.password'],
+			[['profiles' => ['billing' => ['smtp' => ['encryption' => 'tls'] + $smtp]]], 'mail.profiles.billing.smtp.encryption'],
+			[['profiles' => ['billing' => ['smtp' => ['host' => 'ssl://smtp.billing.example'] + $smtp]]], 'mail.profiles.billing.smtp.host'],
+			[['profiles' => ['billing' => ['smtp' => ['host' => ''] + $smtp]]], 'mail.profiles.billing.smtp.host'],
+			[['profiles' => ['billing' => ['smtp' => ['port' => 0] + $smtp]]], 'mail.profiles.billing.smtp.port'],
+			[['profiles' => ['billing' => ['smtp' => ['password_secret' => ''] + $smtp]]], 'mail.profiles.billing.smtp.password_secret'],
+			// Settings of a transport that the profile does not use, its own or that of mail.
+			[['profiles' => ['billing' => ['transport' => 'sendmail', 'smtp' => $smtp]]], 'mail.profiles.billing.smtp'],
+			[['transport' => 'mail', 'profiles' => ['billing' => ['smtp' => $smtp]]], 'mail.profiles.billing.smtp'],
+			[['profiles' => ['billing' => ['sendmail_path' => '/opt/bin/sendmail']]], 'mail.profiles.billing.sendmail_path'],
+			// A value that the profile takes from mail is reported under its mail path.
+			[['transport' => 'mail', 'smtp' => ['host' => ''], 'profiles' => ['billing' => ['transport' => 'smtp']]], 'mail.smtp.host'],
+			[['sendmail_path' => '', 'profiles' => ['local' => ['transport' => 'sendmail']]], 'mail.sendmail_path'],
+		];
+		foreach ($cases as [$mail, $path]) {
+			$e = thrown(MailerConfigException::class, static fn() => mailer($mail), 'cfg ' . export($mail));
+			same($path, $e->path, 'path for ' . export($mail));
+		}
+		// A key that a profile may not hold is refused without its value, a credential included.
+		$e = thrown(MailerConfigException::class, static fn() => mailer(['profiles' => ['billing' => ['smtp' => ['password' => 'cfg-password-123'] + $smtp]]]), 'password in a profile');
+		same("Cfg mail.profiles.billing.smtp.password must be absent (a profile's smtp holds only host, port, encryption, username, password_secret, timeout), got string.", $e->getMessage(), 'password message');
+		$e = thrown(MailerConfigException::class, static fn() => mailer(['profiles' => ['billing' => ['smtp' => \array_diff_key($smtp, ['username' => true])]]]), 'smtp without a username');
+		same("Cfg mail.profiles.billing.smtp.username must be set, since a profile's smtp replaces mail.smtp whole, got null.", $e->getMessage(), 'message for a missing key');
+		$e = thrown(MailerConfigException::class, static fn() => mailer(['transport' => 'sendmail', 'profiles' => ['billing' => ['smtp' => $smtp]]]), 'smtp under the sendmail transport of mail');
+		same("Cfg mail.profiles.billing.smtp must be absent unless the profile's transport is smtp, got array.", $e->getMessage(), 'message for unused smtp');
 	},
 
 	'an HTML message goes out with the cfg sender and Reply-To, a generated text part and the Message-ID it returns' => static function (): void {
@@ -598,6 +689,79 @@ $checks = [
 			[$session['from'], headerValue($data, 'From'), headerValue($data, 'Reply-To')],
 			'envelope sender, From and Reply-To of the next message'
 		);
+	},
+
+	'a profile sends with its own sender, Reply-To, host name, transport and password secret' => static function (): void {
+		[$mailer, $log, $secrets] = mailer(
+			[
+				'log_success' => true,
+				'profiles'    => ['billing' => [
+					'from'     => ['email' => 'billing@example.com', 'name' => 'Billing'],
+					'reply_to' => ['email' => 'accounts@example.com', 'name' => 'Accounts'],
+					'hostname' => 'billing.citomni.test',
+					'smtp'     => ['host' => '127.0.0.1', 'port' => SmtpServer::$port, 'encryption' => 'none', 'username' => 'billing@example.com', 'password_secret' => 'billing.password', 'timeout' => 5],
+				]],
+			],
+			['mail.smtp.password' => SMTP_PASSWORD, 'billing.password' => BILLING_PASSWORD],
+			class: ProfileRecordingMailer::class,
+		);
+		$id = $mailer->send(to: 'a@example.com', subject: 'Invoice', text: 'x', profile: 'billing');
+		$session = SmtpServer::last();
+		$data = (string)$session['data'];
+		same(
+			['billing.citomni.test', "\0billing@example.com\0" . BILLING_PASSWORD, 'billing@example.com', 'Billing <billing@example.com>', 'Accounts <accounts@example.com>'],
+			[$session['helo'], $session['auth'], $session['from'], headerValue($data, 'From'), headerValue($data, 'Reply-To')],
+			'greeting, credentials, envelope sender, From and Reply-To'
+		);
+		expect(\str_ends_with($id, '@billing.citomni.test>'), 'Message-ID outside the host name of the profile: ' . $id);
+
+		// from and replyTo replace the sender and Reply-To of the profile, never its login.
+		$mailer->send(to: 'a@example.com', subject: 'x', text: 'x', replyTo: [], from: 'billing-team@example.com', profile: 'billing');
+		$session = SmtpServer::last();
+		same(
+			["\0billing@example.com\0" . BILLING_PASSWORD, 'billing-team@example.com', null],
+			[$session['auth'], $session['from'], headerValue((string)$session['data'], 'Reply-To')],
+			'credentials, envelope sender and Reply-To with from and replyTo'
+		);
+
+		$mailer->send(to: 'a@example.com', subject: 'x', text: 'x');
+		$session = SmtpServer::last();
+		same(
+			['mailer.citomni.test', "\0mailer@example.com\0" . SMTP_PASSWORD, 'noreply@example.com', 'Support <support@example.com>'],
+			[$session['helo'], $session['auth'], $session['from'], headerValue((string)$session['data'], 'Reply-To')],
+			'greeting, credentials, envelope sender and Reply-To of the next message without a profile'
+		);
+
+		same(['billing.password', 'billing.password', 'mail.smtp.password'], $secrets->reads, 'secret reads');
+		same(['billing', 'billing', null], $mailer->requested, 'profiles that newPhpMailer() got');
+		same(
+			['billing', 'billing', null],
+			\array_map(static fn(array $record): mixed => \array_key_exists('profile', $record['context']) ? $record['context']['profile'] : 'missing', $log->records),
+			'profile in the log lines'
+		);
+		expect(!\str_contains(\serialize($log->records), BILLING_PASSWORD), 'log record contains the password of the profile');
+	},
+
+	'a profile without its own smtp sends through the smtp of mail' => static function (): void {
+		[$mailer, , $secrets] = mailer(['profiles' => ['notices' => ['from' => ['email' => 'notices@example.com', 'name' => 'Notices']]]]);
+		$mailer->send(to: 'a@example.com', subject: 'x', text: 'x', profile: 'notices');
+		$session = SmtpServer::last();
+		$data = (string)$session['data'];
+		same(
+			["\0mailer@example.com\0" . SMTP_PASSWORD, 'notices@example.com', 'Notices <notices@example.com>', 'Support <support@example.com>'],
+			[$session['auth'], $session['from'], headerValue($data, 'From'), headerValue($data, 'Reply-To')],
+			'credentials of mail.smtp, sender of the profile and Reply-To of mail'
+		);
+		same(['mail.smtp.password'], $secrets->reads, 'secret reads');
+	},
+
+	'an unknown profile throws InvalidArgumentException before anything is read or sent' => static function (): void {
+		[$mailer, , $secrets] = mailer(['profiles' => ['billing' => ['from' => ['email' => 'billing@example.com', 'name' => '']]]]);
+		$before = \count(SmtpServer::sessions());
+		$e = thrown(\InvalidArgumentException::class, static fn() => $mailer->send(to: 'a@example.com', subject: 'x', text: 'x', profile: 'Billing'), 'send() with the name in another letter case');
+		same("Cfg mail.profiles has no profile named 'Billing'.", $e->getMessage(), 'message');
+		thrown(\InvalidArgumentException::class, static fn() => $mailer->send(to: 'a@example.com', subject: 'x', text: 'x', profile: ''), 'send() with an empty name');
+		same([$before, []], [\count(SmtpServer::sessions()), $secrets->reads], 'sessions and secret reads');
 	},
 
 	'invalid arguments throw InvalidArgumentException before anything is sent' => static function (): void {
