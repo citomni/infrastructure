@@ -130,9 +130,9 @@ application and higher-level packages
 
 - PHP **8.5+**.
 - Composer autoloading.
-- `citomni/kernel` **^1.0**.
+- `citomni/kernel` **^1.0.3.0**.
 - PHP extensions `ext-curl` and `ext-mysqli`.
-- `phpmailer/phpmailer` **^6.9**.
+- `phpmailer/phpmailer` **^7.1.1**.
 
 Optional integrations and performance aids:
 
